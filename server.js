@@ -1,0 +1,106 @@
+import express from "express";
+import session from "express-session";
+import passport from "passport";
+import configurePassport from "./passport.js";
+import connectPgSimple from "connect-pg-simple";
+import pool from "./db.js";
+import dotenv from "dotenv";
+import cors from "cors";
+import authRoute from "./auth.js";
+import paymentRoute from "./payment.js";
+import processRoute from "./tenantManagement.js";
+import billsRoute from "./bills.js"
+import invoicesRoute from "./invoices.js"
+
+
+dotenv.config();
+
+
+
+const app = express();
+const PgSession = connectPgSimple(session);
+
+app.use(express.json());
+app.use(cors({
+    origin: ["https://estatemate.snametech.app", "http://localhost:3005"],
+    credentials: true               // allow cookies to be sent
+}));
+
+app.use(
+  session({
+    store: new PgSession({
+      pool,
+      pruneSessionInterval: 60,
+      createTableIfMissing: true,  // <-- auto create session table
+    }),
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 1000 * 60 * 60 * 24,
+    },
+  })
+);
+
+app.use(passport.initialize());
+app.use(passport.session());
+configurePassport(passport);
+
+app.use("/api/auth", authRoute);
+app.use("/api/payment", paymentRoute);
+app.use("/api/admin", processRoute);
+app.use("/api/bills", billsRoute);
+app.use("/api/invoices", invoicesRoute);
+
+app.get("/api/session-check", (req, res) => {
+    if (req.isAuthenticated && req.isAuthenticated()) {
+        res.json({ success: true});
+    } else {
+        res.status(401).json({ success: false });
+    }
+});
+
+app.get("/api/auth/user", (req, res) => {
+    // console.log('auth check');
+    if (!req.user) return res.status(401).json({ error: "Not authenticated" });
+
+    // console.log(req.user);
+    res.json({
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+        photo: req.user.photo,
+        total_tasks: req.user.total_tasks,
+        completed_tasks: req.user.completed_tasks,
+        provider: req.user.provider,
+        preferences: req.user.preferences,
+        timezone: req.user.timezone,
+    });
+});
+
+
+// Logout
+app.post("/api/logout", (req, res, next) => {
+    req.logout((err) => {
+        if (err) return next(err);
+
+        // Destroy session on server
+        req.session.destroy((err) => {
+            if (err) return next(err);
+            console.log("Session destroyed");
+
+            // Clear cookie on client
+            res.clearCookie("connect.sid"); // default cookie name for express-session
+            res.json({ message: "Logged out" });
+        });
+    });
+});
+
+// const password = 'dragsville123';
+// const hash = await bcrypt.hash(password, 10);
+// console.log(hash);
+
+app.listen(3003, '0.0.0.0', () => console.log("Server running on port 3003"));
