@@ -58,30 +58,28 @@ router.post("/register/tenant", async (req, res, next) => {
 });
 
 router.post("/login/tenant", (req, res, next) => {
-  console.log("tenant login api hit", req.body);
+  
+  passport.authenticate("tenant-local", (err, user, info) => {
+    if (err || !user) return res.status(401).json({ error: info?.message });
 
-  // Regenerate the session first to avoid old session conflicts
-  req.session.regenerate((err) => {
-    if (err) return next(err);
+    // 1. Manually login
+    req.login(user, (loginErr) => {
+      if (loginErr) return next(loginErr);
 
-    passport.authenticate("tenant-local", (err, user, info) => {
-      if (err) return next(err);
-      if (!user)
-        return res.status(401).json({
-          error: info?.message || "Invalid credentials",
-        });
-
-      req.login(user, (err) => {
-        if (err) return next(err);
-
+      // 2. FORCE the save to Postgres immediately
+      req.session.save((saveErr) => {
+        if (saveErr) return next(saveErr);
+        
+        // 3. ONLY NOW send the response to the app
         return res.json({
           success: true,
           isTemp: user.isTemp || false,
           user,
+          sessionId: req.sessionID
         });
       });
-    })(req, res, next);
-  });
+    });
+  })(req, res, next);
 });
 
 

@@ -11,39 +11,55 @@ import paymentRoute from "./payment.js";
 import processRoute from "./tenantManagement.js";
 import billsRoute from "./bills.js"
 import invoicesRoute from "./invoices.js"
+import { createServer } from "http";
+import { Server } from "socket.io";
 
 
 dotenv.config();
 
 
+const allowedOrigins = [
+  "https://estatemate.snametech.app", 
+  "http://localhost:3005", 
+  "http://localhost:8081" // Standard Expo port
+];
 
 const app = express();
+const httpServer = createServer(app); // Wrap the app
+const io = new Server(httpServer, {
+  path: '/api/socket.io',
+  cors: {
+    origin: allowedOrigins,
+    credentials: true
+  }
+});
 const PgSession = connectPgSimple(session);
 
+const sessionMiddleware = session({
+  store: new PgSession({
+    pool,
+    pruneSessionInterval: 60,
+    createTableIfMissing: true,
+  }),
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  name: 'connect.sid',
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 1000 * 60 * 60 * 24,
+  },
+});
+
+app.use(sessionMiddleware);
 app.use(express.json());
 app.use(cors({
-    origin: ["https://estatemate.snametech.app", "http://localhost:3005"],
-    credentials: true               // allow cookies to be sent
+    origin: allowedOrigins,
+    credentials: true              
 }));
 
-app.use(
-  session({
-    store: new PgSession({
-      pool,
-      pruneSessionInterval: 60,
-      createTableIfMissing: true,  // <-- auto create session table
-    }),
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 1000 * 60 * 60 * 24,
-    },
-  })
-);
 
 app.use(passport.initialize());
 app.use(passport.session());
@@ -103,4 +119,43 @@ app.post("/api/logout", (req, res, next) => {
 // const hash = await bcrypt.hash(password, 10);
 // console.log(hash);
 
-app.listen(3003, '0.0.0.0', () => console.log("Server running on port 3003"));
+io.use((socket, next) => {
+    sessionMiddleware(socket.request, {}, () => {
+        passport.initialize()(socket.request, {}, () => {
+            passport.session()(socket.request, {}, next);
+        });
+    });
+});
+
+// ✅ Auth check
+io.use((socket, next) => {
+    if (!socket.request.user) {
+        return next(new Error("Unauthorized"));
+    }
+    next();
+});
+
+io.on("connection", (socket) => {
+  const session = socket.request.session;
+  
+  // Passport stores the user in session.passport.user
+  const user = session?.passport?.user;
+
+  if (user) {
+    console.log(`✅ Socket connected: User ${user.id} (${user.isTemp ? 'Temp' : 'Full'})`);
+    
+    // Join a private room based on user ID for targeted notifications
+    socket.join(`user_${user.id}`);
+    
+    if (user.isTemp) {
+      socket.join("temp_tenants");
+    }
+  } else {
+    console.log("⚠️ Anonymous socket connected (No session found)");
+  }
+
+  socket.on("disconnect", () => console.log("🔌 Socket disconnected"));
+});
+
+// !!! IMPORTANT: Change app.listen to httpServer.listen !!!
+httpServer.listen(3003, '0.0.0.0', () => console.log("Server running on port 3003"));
