@@ -58,7 +58,7 @@ router.post("/register/tenant", async (req, res, next) => {
 });
 
 router.post("/login/tenant", (req, res, next) => {
-  
+  console.log("tenant login api hit", req.body);
   passport.authenticate("tenant-local", (err, user, info) => {
     if (err || !user) return res.status(401).json({ error: info?.message });
 

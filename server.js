@@ -44,11 +44,12 @@ const sessionMiddleware = session({
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  name: 'connect.sid',
+  name: 'gateman.sid',
   cookie: {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
+    path: "/",
     maxAge: 1000 * 60 * 60 * 24,
   },
 });
@@ -65,6 +66,15 @@ app.use(passport.initialize());
 app.use(passport.session());
 configurePassport(passport);
 
+// app.use((req, res, next) => {
+//     console.log("--- 🕵️ Session Check ---");
+//     console.log("Cookies found:", req.headers.cookie); // See the raw string
+//     console.log("Session ID:", req.sessionID);
+//     console.log("User in Session:", req.session?.passport?.user);
+//     console.log("Is Authenticated:", req.isAuthenticated());
+//     console.log("-----------------------");
+//     next();
+// });
 app.use("/api/auth", authRoute);
 app.use("/api/payment", paymentRoute);
 app.use("/api/admin", processRoute);

@@ -44,53 +44,27 @@ const ensureAdmin = (req, res, next) => {
 };
 
 export const ensureTempTenant = (req, res, next) => {
-  if (req.user) return next(); 
-
-  const sessionId = req.headers['x-session-id'];
-  
-  if (sessionId) {
-    const cleanId = sessionId.startsWith('s:') ? sessionId.split('.')[0].substring(2) : sessionId;
-
-    return req.sessionStore.get(cleanId, (err, session) => {
-      console.log("Session Store Result:", { err, sessionFound: !!session });
-
-      if (session) {
-    // 🔍 This log is the most important one right now
-        console.log("FULL SESSION CONTENT:", JSON.stringify(session, null, 2));
-      }
-
-  // If this check fails, the code exits here with a 401
-  if (err || !session || !session.passport?.user) {
-    console.log("❌ Auth Check Failed: session.passport.user is missing");
-    return res.status(401).json({ error: "Unauthorized" });
+  if (req.isAuthenticated()) {
+    return next();
   }
-      if (err || !session || !session.passport?.user) {
-        return res.status(401).json({ 
-          error: "Session expired or invalid",
-          debug: !session ? "No session in DB" : "No user in session" 
-        });
-      }
-
-      req.user = typeof session.passport.user === 'object' 
-        ? session.passport.user 
-        : { id: session.passport.user };
-      
-      console.log("✅ Authenticated Temp User:", req.user.id);
-      next();
-    });
-  } else {
-    return res.status(401).json({ error: "No session provided" });
-  }
+  console.log("Unauthorized access attempt to temp tenant route");
+  res.status(401).json({ error: "Unauthorized" });
 };
 
+
 // -------------------- Fetch All Join Requests --------------------
-router.get("/join-requests", async (req, res) => {
+router.get("/join-requests", ensureAdmin, async (req, res) => {
+  const adminId = req.user.id; // Get the ID of the logged-in admin
+
   try {
     const result = await pool.query(
       `SELECT jr.*, tt.name AS temp_tenant_name, tt.email AS temp_tenant_email
-      FROM join_requests jr
-      JOIN temp_tenant_users tt ON jr.temp_tenant_id = tt.id
-      ORDER BY jr.requested_at DESC`
+       FROM join_requests jr
+       JOIN temp_tenant_users tt ON jr.temp_tenant_id = tt.id
+       JOIN estate_admin_users eau ON jr.estate_id = eau.estate_id
+       WHERE eau.id = $1
+       ORDER BY jr.requested_at DESC`,
+      [adminId]
     );
 
     res.json({
@@ -98,7 +72,7 @@ router.get("/join-requests", async (req, res) => {
       joinRequests: result.rows,
     });
   } catch (err) {
-    console.error(err);
+    console.error("Fetch Join Requests Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -183,7 +157,7 @@ router.post("/join-request", upload.fields([
     }
 
     await pool.query(
-      "UPDATE temp_tenant_users SET rejection_message = NULL WHERE id = $1",
+      "UPDATE temp_tenant_users SET rejection_message = NULL, is_read = FALSE WHERE id = $1",
       [tempTenantId]
     );
 
@@ -265,9 +239,10 @@ router.post("/approve-tenant/:joinRequestId", ensureAdmin, async (req, res) => {
     const insertRes = await pool.query(
       `INSERT INTO tenant_users (
         estate_id, name, email, password, unit, block, 
-        avatar, id_type, id_front_url, id_back_url, utility_bill_url
+        avatar, id_type, id_front_url, id_back_url, utility_bill_url,
+        first_login
       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,$12)
        RETURNING *`,
       [
         estateId,
@@ -276,11 +251,12 @@ router.post("/approve-tenant/:joinRequestId", ensureAdmin, async (req, res) => {
         temp.password,
         joinRequest.unit,
         joinRequest.block,
-        joinRequest.selfie_url,      // selfie becomes avatar
-        joinRequest.id_type,         // e.g., 'NIN', 'Passport'
+        joinRequest.selfie_url,
+        joinRequest.id_type,
         joinRequest.id_front_url,
         joinRequest.id_back_url,
-        joinRequest.utility_bill_url
+        joinRequest.utility_bill_url,
+        true
       ]
     );
 
@@ -329,9 +305,9 @@ router.delete("/join-request/delete", ensureAdmin, async (req, res) => {
     });
 
     await pool.query(
-      "UPDATE temp_tenant_users SET rejection_message = $1 WHERE id = $2",
+      "UPDATE temp_tenant_users SET rejection_message = $1, is_read = FALSE WHERE id = $2",
       [feedbackObj, temp_tenant_id]
-    );
+    )
 
     await pool.query("DELETE FROM join_requests WHERE id = $1", [id]);
 
@@ -375,9 +351,9 @@ router.put("/join-request/block", ensureAdmin, async (req, res) => {
     });
 
     await pool.query(
-      "UPDATE temp_tenant_users SET rejection_message = $1 WHERE id = $2",
+      "UPDATE temp_tenant_users SET rejection_message = $1, is_read = FALSE WHERE id = $2",
       [feedbackObj, temp_tenant_id]
-    );
+    )
 
     await pool.query("DELETE FROM join_requests WHERE id = $1", [id]);
 
@@ -389,7 +365,7 @@ router.put("/join-request/block", ensureAdmin, async (req, res) => {
 });
 
 router.get("/my-request", ensureTempTenant, async (req, res) => {
-  console.log("Fetching active join request for temp tenant:", req.user.id);
+  console.log("Fetching active join request for temp tenant:", req.user);
   const tempUserId = req.user.id;
 
   try {
@@ -401,20 +377,146 @@ router.get("/my-request", ensureTempTenant, async (req, res) => {
       [tempUserId]
     );
 
-    // 2. Get the structured rejection feedback (JSONB)
     const userRes = await pool.query(
-      "SELECT rejection_message FROM temp_tenant_users WHERE id = $1",
+      "SELECT rejection_message, is_read FROM temp_tenant_users WHERE id = $1",
       [tempUserId]
     );
+
 
     res.json({
       success: true,
       activeRequest: activeRes.rows[0] || null,
-      feedback: userRes.rows[0]?.rejection_message || null 
+      feedback: userRes.rows[0]?.rejection_message || null,
+      isRead: userRes.rows[0]?.is_read ?? false 
     });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });
+  }
+});
+
+// -------------------- Dismiss/Delete Notification --------------------
+router.delete("/notification/dismiss", async (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  const userId = req.user.id;
+  const isPermanentTenant = !!req.user.estate_id; 
+
+  try {
+    if (!isPermanentTenant) {
+      console.log(`Dismissing temp notification for user: ${userId}`);
+      await pool.query(
+        "UPDATE temp_tenant_users SET rejection_message = NULL WHERE id = $1",
+        [userId]
+      );
+      
+      return res.json({ 
+        success: true, 
+        message: "Temporary notification dismissed" 
+      });
+    } else {
+      console.log(`Delete notification requested for Permanent Tenant: ${userId}`);
+      return res.json({ 
+        success: true, 
+        message: "Notification deletion logged (Full implementation pending)" 
+      });
+    }
+  } catch (err) {
+    console.error("Dismiss Notification Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Mark Notification as Read --------------------
+router.put("/notification/read", async (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  const userId = req.user.id;
+  // Permanent tenants have an estate_id assigned to their profile
+  const isPermanentTenant = !!req.user.estate_id; 
+
+  try {
+    if (!isPermanentTenant) {
+      // 1. Logic for Temp Tenant: Set is_read to TRUE
+      console.log(`Marking temp notification as read for user: ${userId}`);
+      await pool.query(
+        "UPDATE temp_tenant_users SET is_read = TRUE WHERE id = $1",
+        [userId]
+      );
+      
+      return res.json({ 
+        success: true, 
+        message: "Temp notification marked as read" 
+      });
+    } else {
+      // 2. Placeholder for Permanent Tenant logic
+      console.log(`Mark as read requested for Permanent Tenant: ${userId} in Estate: ${req.user.estate_id}`);
+      // Future: await pool.query("UPDATE notifications SET is_read = TRUE WHERE user_id = $1", [userId]);
+      
+      return res.json({ 
+        success: true, 
+        message: "Permanent tenant read status logged (Implementation pending)" 
+      });
+    }
+  } catch (err) {
+    console.error("Read Notification Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Fetch Blocked Users (Optimized) --------------------
+router.get("/blocked-users", ensureAdmin, async (req, res) => {
+  const adminId = req.user.id;
+
+  try {
+    const result = await pool.query(
+      `SELECT id, name, email 
+       FROM temp_tenant_users 
+       WHERE id = ANY(
+         SELECT unnest(blocked_tenant_ids) 
+         FROM estate_admin_users 
+         WHERE id = $1
+       )`,
+      [adminId]
+    );
+
+    res.json({
+      success: true,
+      blockedUsers: result.rows,
+    });
+  } catch (err) {
+    console.error("Fetch Blocked Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.put("/join-request/unblock", ensureAdmin, async (req, res) => {
+  const { tempTenantId } = req.body;
+  const adminId = req.user.id;
+
+  try {
+    // Remove the specific ID from the blocked_tenant_ids array
+    await pool.query(
+      `UPDATE estate_admin_users 
+       SET blocked_tenant_ids = array_remove(blocked_tenant_ids, $1) 
+       WHERE id = $2`,
+      [tempTenantId, adminId]
+    );
+
+    // Optional: Clear the 'block' message for the user so they can try again
+    await pool.query(
+      "UPDATE temp_tenant_users SET rejection_message = NULL WHERE id = $1",
+      [tempTenantId]
+    );
+
+    res.json({ success: true, message: "User has been unblocked." });
+  } catch (err) {
+    console.error("Unblock Error:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
