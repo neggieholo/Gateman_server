@@ -78,18 +78,41 @@ router.get("/join-requests", ensureAdmin, async (req, res) => {
 });
 
 // -------------------- Fetch All Tenants --------------------
-router.get("/tenants", ensureAdmin, async (req, res) => {
+router.get("/tenants", async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT * FROM tenant_users ORDER BY created_at DESC`
-    );
+    const estateId = req.user?.estate_id;
+    const currentUserId = req.user?.id;
+
+    if (!estateId) {
+      return res.status(401).json({ error: "Unauthorized: No estate assigned." });
+    }
+    let query;
+    let params;
+
+    if (req.user.unit) {
+      query = `
+        SELECT id, name, email, unit, block, avatar, estate_id 
+        FROM tenant_users 
+        WHERE estate_id = $1 AND id != $2
+        ORDER BY name ASC`;
+      params = [estateId, currentUserId];
+    } else {
+      query = `
+        SELECT id, name, email, unit, block, avatar, estate_id 
+        FROM tenant_users 
+        WHERE estate_id = $1 
+        ORDER BY name ASC`;
+      params = [estateId];
+    }
+
+    const result = await pool.query(query, params);
 
     res.json({
       success: true,
       tenants: result.rows,
     });
   } catch (err) {
-    console.error(err);
+    console.error("Fetch tenants error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

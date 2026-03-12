@@ -1,6 +1,6 @@
 import express from "express";
 import passport from "passport"; 
-
+import firebaseAdmin from "./firebase.js";
 import bcrypt from "bcrypt";
 import pool from "./db.js";
 
@@ -62,20 +62,31 @@ router.post("/login/tenant", (req, res, next) => {
   passport.authenticate("tenant-local", (err, user, info) => {
     if (err || !user) return res.status(401).json({ error: info?.message });
 
-    // 1. Manually login
     req.login(user, (loginErr) => {
       if (loginErr) return next(loginErr);
 
-      // 2. FORCE the save to Postgres immediately
-      req.session.save((saveErr) => {
+      req.session.save(async (saveErr) => {
         if (saveErr) return next(saveErr);
-        
-        // 3. ONLY NOW send the response to the app
+
+        let customToken = null;
+
+        if (!user.isTemp) {
+          try {
+            const postgresUserId = user.id.toString();
+            customToken = await firebaseAdmin.auth().createCustomToken(postgresUserId, {
+              role: "resident"
+            });
+          } catch (firebaseErr) {
+            console.error("Firebase Token Error:", firebaseErr);
+          }
+        }
+
         return res.json({
           success: true,
           isTemp: user.isTemp || false,
           user,
-          sessionId: req.sessionID
+          sessionId: req.sessionID,
+          chatToken: customToken
         });
       });
     });

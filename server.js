@@ -13,6 +13,7 @@ import billsRoute from "./bills.js"
 import invoicesRoute from "./invoices.js"
 import { createServer } from "http";
 import { Server } from "socket.io";
+import firebaseAdmin from "./firebase.js";
 
 
 dotenv.config();

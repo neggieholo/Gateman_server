@@ -39,3 +39,5 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+gateman-fef40-firebase-adminsdk-fbsvc-412c3cfd54.json
