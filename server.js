@@ -114,13 +114,11 @@ app.post("/api/logout", (req, res, next) => {
     req.logout((err) => {
         if (err) return next(err);
 
-        // Destroy session on server
         req.session.destroy((err) => {
             if (err) return next(err);
             console.log("Session destroyed");
 
-            // Clear cookie on client
-            res.clearCookie("connect.sid"); // default cookie name for express-session
+            res.clearCookie("gateman.sid");
             res.json({ message: "Logged out" });
         });
     });
@@ -146,26 +144,55 @@ io.use((socket, next) => {
     next();
 });
 
+
+const userStatus = new Map();
+
 io.on("connection", (socket) => {
-  const session = socket.request.session;
-  
-  // Passport stores the user in session.passport.user
-  const user = session?.passport?.user;
+  const user = socket.request.user;
+  const estateId = user?.estate_id; // Ensure your passport user object has estate_id
 
-  if (user) {
-    console.log(`✅ Socket connected: User ${user.id} (${user.isTemp ? 'Temp' : 'Full'})`);
+  if (user && user.id && estateId) {
+    console.log(`✅ Socket connected: User ${user.id}`);
+    const estateRoom = `estate_${estateId}`;
     
-    // Join a private room based on user ID for targeted notifications
+    // 1. Join the estate-specific neighborhood
+    socket.join(estateRoom);
     socket.join(`user_${user.id}`);
-    
-    if (user.isTemp) {
-      socket.join("temp_tenants");
-    }
-  } else {
-    console.log("⚠️ Anonymous socket connected (No session found)");
-  }
 
-  socket.on("disconnect", () => console.log("🔌 Socket disconnected"));
+    // 2. Update Map
+    userStatus.set(user.id, "online");
+
+    // 3. ONLY notify people in the same estate
+    socket.to(estateRoom).emit("user_status_change", { 
+      userId: user.id, 
+      status: "online" 
+    });
+
+    // console.log("User status:", Array.from(userStatus.keys()));
+
+    const currentOnlineInEstate = Array.from(userStatus.keys())
+
+    socket.emit("initial_online_list", currentOnlineInEstate);
+
+    socket.on("typing_start", (targetId) => {
+        // console.log(`Typing: ${user.id} -> ${targetId}`);
+      socket.to(`user_${targetId}`).emit("is_typing", { from: user.id, typing: true });
+    });
+
+    socket.on("typing_stop", (targetId) => {
+      // console.log(`Stopped Typing: ${user.id} -> ${targetId}`);
+      socket.to(`user_${targetId}`).emit("is_typing", { from: user.id, typing: false });
+    })
+
+    socket.on("disconnect", () => {
+      userStatus.delete(user.id);
+      // ONLY notify people in the same estate
+      socket.to(estateRoom).emit("user_status_change", { 
+        userId: user.id, 
+        status: "offline" 
+      });
+    });
+  }
 });
 
 // !!! IMPORTANT: Change app.listen to httpServer.listen !!!
