@@ -91,14 +91,14 @@ router.get("/tenants", async (req, res) => {
 
     if (req.user.unit) {
       query = `
-        SELECT id, name, email, unit, block, avatar, estate_id 
+        SELECT id, name, email, unit, block, avatar, estate_id, push_token
         FROM tenant_users 
         WHERE estate_id = $1 AND id != $2
         ORDER BY name ASC`;
       params = [estateId, currentUserId];
     } else {
       query = `
-        SELECT id, name, email, unit, block, avatar, estate_id 
+        SELECT id, name, email, unit, block, avatar, estate_id, push_token 
         FROM tenant_users 
         WHERE estate_id = $1 
         ORDER BY name ASC`;
@@ -557,7 +557,93 @@ router.get("/estates", async (req, res) => {
   }
 });
 
+// -------------------- Update Push Token (Secure) --------------------
+router.post("/update-push-token", async (req, res) => {
+  const userId = req.user?.id; 
+  const { pushToken } = req.body;
+  console.log("Push Token:", pushToken)
 
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized: User session not found." });
+  }
+
+  if (!pushToken) {
+    return res.status(400).json({ error: "pushToken is required" });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE tenant_users SET push_token = $1 WHERE id = $2 RETURNING id, name`,
+      [pushToken, userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Tenant record not found" });
+    }
+
+    res.json({
+      success: true,
+      message: "Push token linked to your account",
+      user: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Update Push Token Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Group Push Notification Dispatcher --------------------
+router.post("/send-group-notification", async (req, res) => {
+  const { memberIds, text, roomId, senderName, groupName } = req.body;
+  const currentUserId = req.user?.id; // Authenticated sender
+
+  if (!memberIds || !Array.isArray(memberIds)) {
+    return res.status(400).json({ error: "memberIds array is required" });
+  }
+
+  const uuidIds = memberIds.filter(id => typeof id === 'string' && id.length > 0);
+
+  try {
+    const result = await pool.query(
+      `SELECT push_token FROM tenant_users 
+       WHERE id = ANY($1::uuid[]) AND id != $2::uuid AND push_token IS NOT NULL`,
+      [uuidIds, currentUserId]
+    );
+
+    const targetTokens = result.rows.map(r => r.push_token);
+
+    if (targetTokens.length === 0) {
+      return res.json({ success: true, message: "No recipients with push tokens found." });
+    }
+
+    // 2. Prepare the Expo notification batch
+    const notifications = targetTokens.map(token => ({
+      to: token,
+      sound: "default",
+      title: groupName || "Estate Group",
+      body: `${senderName}: ${text || "Sent an attachment"}`,
+      data: { 
+        type: "chat", 
+        roomId: roomId, 
+        isGroup: true,
+        senderName: senderName,
+      },
+      channelId: "default"
+    }));
+
+    // 3. Fire to Expo (Backend to Backend)
+    await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(notifications),
+    });
+
+    res.json({ success: true, count: targetTokens.length });
+  } catch (err) {
+    console.error("Group Push Error:", err);
+    res.status(500).json({ error: "Internal server error dispatching group push" });
+  }
+});
 
 export default router;
 

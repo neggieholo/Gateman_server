@@ -1,5 +1,6 @@
 import admin from 'firebase-admin';
 import serviceAccount from './gateman-fef40-firebase-adminsdk-fbsvc-412c3cfd54.json' with { type: 'json' };
+import pool from "./db.js";
 
 try {
   if (!admin.apps.length) {
