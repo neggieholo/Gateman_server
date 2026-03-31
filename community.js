@@ -93,6 +93,27 @@ router.post("/like", isAuth, async (req, res) => {
   }
 });
 
+// --- 8. GET LIKES FOR A POST ---
+router.get("/likes/:post_id", isAuth, async (req, res) => {
+  console.log("Fetching likes for post_id:", req.params.post_id);
+  const { post_id } = req.params;
+
+  try {
+    const query = `
+      SELECT l.user_id, l.created_at, u.name as author_name 
+      FROM likes l
+      JOIN tenant_users u ON l.user_id = u.id
+      WHERE l.post_id = $1
+      ORDER BY l.created_at DESC;
+    `;
+    const { rows } = await pool.query(query, [post_id]);
+    res.json(rows);
+  } catch (err) {
+    console.error("Error fetching likes:", err);
+    res.status(500).json({ error: "Failed to fetch likes" });
+  }
+});
+
 // --- 4. ADD A COMMENT (Transaction) ---
 router.post("/comments", isAuth, async (req, res) => {
   const { post_id, author_name, content } = req.body;

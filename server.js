@@ -15,6 +15,7 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import firebaseAdmin from "./firebase.js";
 import communityRoute from './community.js'
+import invitationsRoute from './invitations.js';
 
 
 dotenv.config();
@@ -83,6 +84,7 @@ app.use("/api/admin", processRoute);
 app.use("/api/bills", billsRoute);
 app.use("/api/invoices", invoicesRoute);
 app.use("/api/community", communityRoute);
+app.use("/api/invitations", invitationsRoute);
 
 app.get("/api/session-check", (req, res) => {
     if (req.isAuthenticated && req.isAuthenticated()) {
