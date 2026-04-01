@@ -4,45 +4,74 @@ import firebaseAdmin from "./firebase.js";
 import bcrypt from "bcrypt";
 import pool from "./db.js";
 
+import { sendRegistrationOTP } from "./emailService.js";
+import crypto from "crypto";
+
 const router = express.Router();
 
 
+const OTP_SECRET = process.env.OTP_SECRET || "gate-man-local-secret";
+
+router.post("/otp/send", async (req, res) => {
+  console.log("OTP send request received for email:", req.body.email);
+  const { email } = req.body;
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const expires = Date.now() + 10 * 60000; 
+
+  const data = `${email}.${otp}.${expires}`;
+  const hash = crypto.createHmac("sha256", OTP_SECRET).update(data).digest("hex");
+  const metadata = `${hash}.${expires}`;
+
+  const emailSent = await sendRegistrationOTP(email, otp);
+
+  if (emailSent) {
+    res.json({ success: true, metadata });
+  } else {
+    res.status(500).json({ error: "Failed to send email" });
+  }
+});
 // ------------------ Register Tenant ------------------
 router.post("/register/tenant", async (req, res, next) => {
-  console.log("tenant registration api hit", req.body);
-  const { email, password, name } = req.body;
+  const { email, password, name, otp, metadata } = req.body;
 
   try {
-    // 1. Check if email exists in either table
+    // 1. Verify the Metadata "Proof"
+    const [hash, expires] = metadata.split(".");
+    
+    if (Date.now() > parseInt(expires)) {
+      return res.status(400).json({ error: "OTP expired. Please resend." });
+    }
+
+    const data = `${email}.${otp}.${expires}`;
+    const verifyHash = crypto.createHmac("sha256", OTP_SECRET).update(data).digest("hex");
+
+if (!crypto.timingSafeEqual(Buffer.from(verifyHash, 'hex'), Buffer.from(hash, 'hex'))) {
+  return res.status(400).json({ error: "Invalid OTP code." });
+}
+    // 2. Security Check: Ensure email isn't already taken
     const existingUser = await pool.query(
-      `SELECT email FROM tenant_users WHERE email = $1
-       UNION
-       SELECT email FROM temp_tenant_users WHERE email = $1`,
-      [email]
+      `SELECT email FROM tenant_users WHERE email = $1 
+       UNION SELECT email FROM temp_tenant_users WHERE email = $1`,
+      [email.toLowerCase().trim()]
     );
 
     if (existingUser.rows.length > 0) {
-      return res.status(400).json({ 
-        error: "This email is already registered. Please login or wait for approval if your request is pending." 
-      });
+       return res.status(400).json({ error: "User already exists." });
     }
 
-    // 2. Proceed with registration
-    const hash = await bcrypt.hash(password, 10);
-
+    // 3. Hash Password and Insert
+    const passwordHash = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      `INSERT INTO temp_tenant_users (email, password, name)
-       VALUES ($1, $2, $3)
-       RETURNING id, email, name, created_at`, // 🛡️ Do not return password hash
-      [email, hash, name]
+      `INSERT INTO temp_tenant_users (email, password, name) 
+       VALUES ($1, $2, $3) RETURNING id, email, name`,
+      [email, passwordHash, name]
     );
 
     const user = result.rows[0];
-    user.isTemp = true; // passport marker
+    user.isTemp = true;
 
     req.login(user, (err) => {
       if (err) return next(err);
-
       res.json({
         success: true,
         pending: true,
@@ -53,7 +82,7 @@ router.post("/register/tenant", async (req, res, next) => {
 
   } catch (err) {
     console.error(err);
-    res.status(400).json({ error: "Registration failed. Please try again." });
+    res.status(500).json({ error: "Registration failed." });
   }
 });
 

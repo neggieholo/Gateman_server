@@ -16,15 +16,18 @@ import { Server } from "socket.io";
 import firebaseAdmin from "./firebase.js";
 import communityRoute from './community.js'
 import invitationsRoute from './invitations.js';
+import crypto from "crypto";
+import { sendPasswordResetCode } from "./emailService.js";
+import bcrypt from "bcrypt";
 
 
 dotenv.config();
 
 
 const allowedOrigins = [
-  "https://estatemate.snametech.app", 
+  "https:/gatemanhq.com", 
   "http://localhost:3005", 
-  "http://localhost:8081" // Standard Expo port
+  "http://localhost:8081" 
 ];
 
 const app = express();
@@ -126,6 +129,147 @@ app.post("/api/logout", (req, res, next) => {
             res.json({ message: "Logged out" });
         });
     });
+});
+
+app.post("/api/forgot-password", async (req, res) => {
+    const { email, role } = req.body;
+    console.log(`[Forgot Password] Request received for email: ${email}, role: ${role}`);
+
+    if (!role || !email) {
+        return res.status(400).json({ success: false, message: "Email and role are required" });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+
+    try {
+        let tableName = "";
+        let user = null;
+
+        if (role === "admin") {
+            tableName = "estate_admin_users";
+            const result = await pool.query(`SELECT id, email FROM ${tableName} WHERE email = $1`, [cleanEmail]);
+            user = result.rows[0];
+        } 
+        else if (role === "tenant") {
+            // 1. Search primary tenants first
+            const primarySearch = await pool.query(`SELECT id, email FROM tenant_users WHERE email = $1`, [cleanEmail]);
+            
+            if (primarySearch.rows.length > 0) {
+                user = primarySearch.rows[0];
+                tableName = "tenant_users";
+            } else {
+                // 2. Search temporary tenants if not found in primary
+                const tempSearch = await pool.query(`SELECT id, email FROM temp_tenant_users WHERE email = $1`, [cleanEmail]);
+                if (tempSearch.rows.length > 0) {
+                    user = tempSearch.rows[0];
+                    tableName = "temp_tenant_users";
+                }
+            }
+        } else {
+            return res.status(400).json({ success: false, message: "Invalid role provided" });
+        }
+
+        // If after checking the relevant tables we still have no user
+        if (!user) {
+            return res.json({ success: false, message: "Email not found" });
+        }
+
+        // Generate Secure Token
+        const resetToken = crypto.randomBytes(32).toString("hex");
+        const expiry = new Date(Date.now() + 3600000); // 1 hour
+
+        // Update the specific table where the user was found
+        await pool.query(
+            `UPDATE ${tableName} SET reset_token = $1, reset_token_expiry = $2 WHERE id = $3`,
+            [resetToken, expiry, user.id]
+        );
+
+        // Construct the link (keeping the specific table-role for the frontend reset page)
+        const displayRole = tableName === "temp_tenant_users" ? "temp_tenant" : role;
+        const resetLink = `http://localhost:3005/passwordReset/${displayRole}/${user.id}/${resetToken}`;
+
+        const emailSent = await sendPasswordResetCode(cleanEmail, resetLink);
+
+        if (emailSent) {
+            return res.json({ 
+                success: true, 
+                message: "Reset link sent! Please check your email." 
+            });
+        } else {
+            return res.status(500).json({ success: false, message: "Email service failed" });
+        }
+
+    } catch (error) {
+        console.error("Forgot Password System Error:", error);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+});
+
+app.post("/api/reset-password", async (req, res) => {
+    const { token, password, role, userId } = req.body;
+
+    // 1. Validation
+    if (!token || !password || !role || !userId) {
+        return res.status(400).json({ success: false, message: "Missing required fields" });
+    }
+
+    try {
+        // 2. Map the role to your specific PostgreSQL table names
+        let tableName = "";
+        if (role === "admin") {
+            tableName = "estate_admin_users";
+        } else if (role === "tenant") {
+            tableName = "tenant_users";
+        } else if (role === "temp_tenant") {
+            tableName = "temp_tenant_users";
+        } else {
+            return res.status(400).json({ success: false, message: "Invalid role" });
+        }
+
+        // 3. Find user with valid token and check expiry
+        // In PostgreSQL, we compare the current timestamp to reset_token_expiry
+        const userQuery = await pool.query(
+            `SELECT id FROM ${tableName} 
+             WHERE id = $1 
+             AND reset_token = $2 
+             AND reset_token_expiry > NOW()`,
+            [userId, token]
+        );
+
+        if (userQuery.rows.length === 0) {
+            return res.json({ 
+                success: false, 
+                message: "Invalid or expired reset token. Please request a new one." 
+            });
+        }
+
+        // 4. Hash the new password
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // 5. Update password and CLEAR the token fields
+        await pool.query(
+            `UPDATE ${tableName} 
+             SET password = $1, 
+                 reset_token = NULL, 
+                 reset_token_expiry = NULL 
+             WHERE id = $2`,
+            [hashedPassword, userId]
+        );
+
+        console.log(`[Auth] Password reset successful for ${role} ID: ${userId}`);
+
+        return res.json({ 
+            success: true, 
+            message: "Password has been reset successfully. You can now log in." 
+        });
+
+    } catch (error) {
+        console.error("Password Reset Error:", error);
+        return res.status(500).json({ 
+            success: false, 
+            message: "Internal server error during password reset." 
+        });
+    }
 });
 
 // const password = 'dragsville123';
