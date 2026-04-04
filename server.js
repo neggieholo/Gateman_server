@@ -16,6 +16,7 @@ import { Server } from "socket.io";
 import firebaseAdmin from "./firebase.js";
 import communityRoute from './community.js'
 import invitationsRoute from './invitations.js';
+import securityRoute from './securityManagement.js'
 import crypto from "crypto";
 import { sendPasswordResetCode } from "./emailService.js";
 import bcrypt from "bcrypt";
@@ -88,6 +89,7 @@ app.use("/api/bills", billsRoute);
 app.use("/api/invoices", invoicesRoute);
 app.use("/api/community", communityRoute);
 app.use("/api/invitations", invitationsRoute);
+app.use("/api/security", securityRoute);
 
 app.get("/api/session-check", (req, res) => {
     if (req.isAuthenticated && req.isAuthenticated()) {
@@ -272,7 +274,68 @@ app.post("/api/reset-password", async (req, res) => {
     }
 });
 
-// const password = 'dragsville123';
+app.post("/api/change-password", async (req, res) => {
+    const { currentPassword, newPassword, role } = req.body;
+    
+    // 1. Ensure user is authenticated (Check your passport/session middleware)
+    if (!req.user || !req.isAuthenticated()) {
+        return res.status(401).json({ success: false, message: "Not authenticated" });
+    }
+
+    if (!currentPassword || !newPassword || !role) {
+        return res.status(400).json({ success: false, message: "All fields are required" });
+    }
+
+    try {
+        // 2. Determine Table (Reuse your logic)
+        let tableName = "";
+        if (role === "admin") tableName = "estate_admin_users";
+        else if (role === "tenant") tableName = "tenant_users";
+        else if (role === "temp_tenant") tableName = "temp_tenant_users";
+        else if (role === "security") tableName = "security_users"; // Added for GateMan
+        else return res.status(400).json({ success: false, message: "Invalid role" });
+
+        // 3. Fetch current password hash from DB
+        const userResult = await pool.query(
+            `SELECT password FROM ${tableName} WHERE id = $1`, 
+            [req.user.id]
+        );
+
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "User not found" });
+        }
+
+        const storedHash = userResult.rows[0].password;
+
+        // 4. Verify Current Password
+        const isMatch = await bcrypt.compare(currentPassword, storedHash);
+        if (!isMatch) {
+            return res.json({ success: false, message: "Current password is incorrect" });
+        }
+
+        // 5. Hash New Password & Update
+        const saltRounds = 10;
+        const newHash = await bcrypt.hash(newPassword, saltRounds);
+
+        await pool.query(
+            `UPDATE ${tableName} SET password = $1 WHERE id = $2`,
+            [newHash, req.user.id]
+        );
+
+        console.log(`[Auth] Password changed successfully for ${role} ID: ${req.user.id}`);
+        
+        return res.json({ 
+            success: true, 
+            message: "Password updated successfully" 
+        });
+
+    } catch (error) {
+        console.error("Change Password Error:", error);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+});
+
+// const password = 'dragsville';
 // const hash = await bcrypt.hash(password, 10);
 // console.log(hash);
 

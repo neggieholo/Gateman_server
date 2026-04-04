@@ -5,6 +5,26 @@ import crypto from "crypto";
 import cron from "node-cron";
 const router = express.Router();
 
+// --- 1. GET ALL INVITATIONS ---
+router.get("/", isAuth, async (req, res) => {
+  const estate_id = req.user.estate_id;
+
+  try {
+    const query = `
+      SELECT * FROM invitations 
+      WHERE estate_id = $1
+      ORDER BY created_at DESC;
+    `;
+    const { rows } = await pool.query(query, [estate_id]);
+    // console.log("Invitations Retrieved:", rows.length);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch invitations" });
+  }
+});
+
+
 // --- 1. GET ALL INVITATIONS (FOR TRACK GUEST VIEW) ---
 router.get("/resident", isAuth, async (req, res) => {
   const { estate_id } = req.query;
@@ -94,6 +114,80 @@ router.post("/", isAuth, async (req, res) => {
     res.status(500).json({ error: "Failed to generate invitation" });
   } finally {
     client.release();
+  }
+});
+
+// --- 4. LOG ACTIVITY (CHECK-IN / CHECK-OUT) ---
+router.post("/log-activity/:id", isAuth, async (req, res) => {
+  console.log("Log Activity Request Params:", req.params);
+  const { id } = req.params;
+  const { action } = req.body; // 'check_in' or 'check_out'
+  const estate_id = req.user.estate_id;
+
+  const now = new Date();
+  const currentDate = now.toISOString().split('T')[0];
+  const currentTime = now.toTimeString().split(' ')[0].substring(0, 5); // HH:mm
+
+  try {
+    // 1. Fetch current invitation state
+    const inviteResult = await pool.query(
+      "SELECT * FROM invitations WHERE id = $1 AND estate_id = $2",
+      [id, estate_id]
+    );
+
+    if (inviteResult.rows.length === 0) {
+      return res.status(404).json({ error: "Invitation not found" });
+    }
+
+    const invite = inviteResult.rows[0];
+
+    // 2. Validation Guardrails
+    if (invite.is_cancelled) return res.status(400).json({ error: "Invitation is cancelled" });
+    
+    // Check Exclusions for Multi-Entry
+    if (invite.invite_type === 'multi_entry' && invite.excluded_dates?.includes(currentDate)) {
+      return res.status(403).json({ error: "Access denied: Date is excluded" });
+    }
+
+    let updateQuery;
+    let params;
+
+    if (action === 'check_in') {
+      updateQuery = `
+        UPDATE invitations 
+        SET 
+          status = 'checked_in',
+          actual_checkin_date = $1,
+          actual_checkin_time = $2,
+          actual_checkout_date = NULL,
+          actual_checkout_time = NULL,
+          is_used = TRUE
+        WHERE id = $3
+        RETURNING *;
+      `;
+      params = [currentDate, currentTime, id];
+    } else if (action === 'check_out') {
+      updateQuery = `
+        UPDATE invitations 
+        SET 
+          status = 'checked_out',
+          actual_checkout_date = $1,
+          actual_checkout_time = $2
+        WHERE id = $3
+        RETURNING *;
+      `;
+      params = [currentDate, currentTime, id];
+    }
+
+    const { rows } = await pool.query(updateQuery, params);
+    
+    // Optional: Trigger a notification to the Resident
+    // sendPushNotification(invite.resident_push_token, "Guest Update", `${invite.guest_name} has ${action === 'check_in' ? 'arrived' : 'departed'}.`);
+
+    res.json({ message: `Guest ${action.replace('_', ' ')} successfully`, invitation: rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to log activity" });
   }
 });
 
@@ -228,60 +322,66 @@ const sendPushNotification = async (token, title, body, data = {}) => {
   }
 };
 
-// cron.schedule('*/10 * * * *', async () => {
-//   try {
-//     const query = `
-//       SELECT i.id, i.guest_name, u.push_token 
-//       FROM invitations i
-//       JOIN tenant_users u ON i.resident_id = u.id
-//       WHERE i.status = 'checked_in' 
-//       AND i.is_cancelled = false
-//       AND (i.end_date + i.end_time) < NOW();
-//     `;
+// --- OVERSTAY ALERT ---
+cron.schedule('*/10 * * * *', async () => {
+  try {
+    const overstayQuery = `
+      SELECT i.id, i.guest_name, i.estate_id, u.push_token as resident_token
+      FROM invitations i
+      JOIN tenant_users u ON i.resident_id = u.id
+      WHERE i.status = 'checked_in' 
+      AND i.is_cancelled = false
+      AND (i.end_date + i.end_time) < NOW();
+    `;
     
-//     const { rows } = await pool.query(query);
-//     if (rows.length === 0) return;
+    const { rows: overstays } = await pool.query(overstayQuery);
+    if (overstays.length === 0) return;
 
-//     // Process all notifications in parallel
-//     await Promise.all(rows.map(async (invitation) => {
-//       if (invitation.push_token) {
-//         try {
-//           await sendPushNotification(
-//             invitation.push_token,
-//             "Overstay Alert 🚨",
-//             `${invitation.guest_name} has exceeded their stay.`,
-//             { type: "overstay_alert", invitationId: invitation.id }
-//           );
-//         } catch (pushErr) {
-//           console.error(`Push failed for ${invitation.id}:`, pushErr);
-//         }
-//       }
+    for (const record of overstays) {
+      const securityQuery = `
+        SELECT push_token 
+        FROM security_users 
+        WHERE estate_id = $1 AND is_on_duty = true
+      `;
+      const { rows: onDutyGuards } = await pool.query(securityQuery, [record.estate_id]);
 
-//       // Update status immediately after attempting notification
-//       await pool.query(
-//         "UPDATE invitations SET status = 'overstayed' WHERE id = $1", 
-//         [invitation.id]
-//       );
-//     }));
+      const alertTitle = "Overstay Alert 🚨";
+      const alertBody = `${record.guest_name} has exceeded their stay time.`;
 
-//     console.log(`[GateMan] Processed ${rows.length} overstays.`);
-//   } catch (err) {
-//     console.error("Overstay Cron Error:", err);
-//   }
-// });
+      // Notify Resident
+      if (record.resident_token) {
+        sendPushNotification(record.resident_token, alertTitle, alertBody, { type: "overstay", id: record.id });
+      }
 
-// cron.schedule('0 2 * * *', async () => {
-//   try {
-//     const result = await pool.query(`
-//       DELETE FROM invitations 
-//       WHERE is_cancelled = true 
-//       OR status = 'checked_out'
-//       OR (status = 'pending' AND (end_date + end_time) < NOW() - INTERVAL '1 day')
-//     `);
-//     console.log(`[GateMan Cleanup] Purged ${result.rowCount} old records.`);
-//   } catch (err) {
-//     console.error("Cleanup Cron Error:", err);
-//   }
-// });
+      // Notify ONLY the guards on shift
+      onDutyGuards.forEach(guard => {
+        if (guard.push_token) {
+          sendPushNotification(guard.push_token, alertTitle, `[Duty Alert] ${alertBody}`, { type: "overstay", id: record.id });
+        }
+      });
+
+      await pool.query("UPDATE invitations SET status = 'overstayed' WHERE id = $1", [record.id]);
+    }
+  } catch (err) {
+    console.error("Overstay Cron Error:", err);
+  }
+});
+
+// --- DELETE INVALID INVITATIONS ---
+cron.schedule('0 2 * * *', async () => {
+  try {
+    const cleanupQuery = `
+      DELETE FROM invitations 
+      WHERE is_cancelled = true 
+      OR status = 'checked_out'
+      OR (status = 'pending' AND (end_date + end_time) < NOW() - INTERVAL '1 day');
+    `;
+
+    const result = await pool.query(cleanupQuery);
+    console.log(`[Cleanup] Purged ${result.rowCount} expired/inactive records.`);
+  } catch (err) {
+    console.error("Cleanup Cron Error:", err);
+  }
+});
 
 export default router;

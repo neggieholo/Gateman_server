@@ -1,0 +1,609 @@
+import express from "express";
+import pool from "./db.js";
+import multer from 'multer';
+import { v2 as cloudinary } from 'cloudinary';
+
+const router = express.Router();
+
+cloudinary.config({
+  cloud_name: "diubaoqcr",
+  api_key: "962197146245963",
+  api_secret: process.env.CLOUDINARYAPISECRET,
+});
+
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
+// Reuse your Cloudinary logic
+const uploadToCloudinary = (fileBuffer) => {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { folder: "security_kyc" },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result.secure_url);
+      }
+    );
+    uploadStream.end(fileBuffer);
+  });
+};
+
+// Middleware to ensure the requester is an Estate Admin
+const ensureAdmin = (req, res, next) => {
+  if (req.isAuthenticated() && req.user.role === 'ADMIN') {
+    return next();
+  }
+  res.status(403).json({ error: "Unauthorized: Admin access required." });
+};
+
+
+// -------------------- 2. Fetch Security Requests (Admin View) --------------------
+router.get("/join-requests", ensureAdmin, async (req, res) => {
+  const estateId = req.user.estate_id;
+
+  try {
+    const result = await pool.query(
+      `SELECT sjr.*, ts.name, ts.email 
+       FROM security_join_requests sjr
+       JOIN temp_security_users ts ON sjr.temp_security_id = ts.id
+       WHERE sjr.estate_id = $1 AND sjr.status = 'PENDING'
+       ORDER BY sjr.requested_at DESC`,
+      [estateId]
+    );
+    res.json({ success: true, requests: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- 1. Submit Security Join Request --------------------
+router.post("/join-request", upload.fields([
+  { name: 'selfie', maxCount: 1 },
+  { name: 'idFront', maxCount: 1 },
+  { name: 'idBack', maxCount: 1 }
+]), async (req, res) => {
+  const { tempSecurityId, estateId, idType } = req.body;
+  // console.log("Received join request:", { tempSecurityId, estateId, idType });
+
+    if (!tempSecurityId || !estateId) {
+    return res.status(400).json({ error: "Id and Estate registration are required" });
+  }
+
+  try {
+    // Prevent duplicate requests
+    const existing = await pool.query(
+      "SELECT id FROM security_join_requests WHERE temp_security_id = $1",
+      [tempSecurityId]
+    );
+    if (existing.rows.length > 0) return res.status(409).json({ error: "Request already pending." });
+
+    const blockCheck = await pool.query(
+      `SELECT id FROM estate_admin_users 
+       WHERE estate_id = $1 AND $2 = ANY(blocked_security_ids)`,
+      [estateId, tempSecurityId]
+    );
+
+    if (blockCheck.rows.length > 0) {
+      return res.status(403).json({ 
+        success: false, 
+        error: "Your application has been restricted by this estate's administration." 
+      });
+    }    
+
+    await pool.query(
+      "UPDATE temp_security_users SET rejection_message = NULL, is_read = FALSE WHERE id = $1",
+      [tempSecurityId]
+    );
+
+    // Upload Files
+    const uploadTasks = {};
+    const fieldNames = ['selfie', 'idFront', 'idBack'];
+    for (const field of fieldNames) {
+      if (req.files[field]) {
+        uploadTasks[field] = await uploadToCloudinary(req.files[field][0].buffer);
+      }
+    }
+
+    const result = await pool.query(
+      `INSERT INTO security_join_requests 
+       (temp_security_id, estate_id, id_type, selfie_url, id_front_url, id_back_url)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [tempSecurityId, estateId, idType, uploadTasks['selfie'], uploadTasks['idFront'], uploadTasks['idBack']]
+    );
+
+    res.status(201).json({ success: true, joinRequest: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to submit security request." });
+  }
+});
+
+// -------------------- 3. Approve Security (The Promotion) --------------------
+router.post("/approve/:requestId", ensureAdmin, async (req, res) => {
+  const { requestId } = req.params;
+
+  try {
+    await pool.query("BEGIN");
+
+    // 1. Get Request and User Info (Now including phone from temp table)
+    const requestRes = await pool.query(
+      `SELECT sjr.*, ts.name, ts.email, ts.password, ts.phone 
+       FROM security_join_requests sjr 
+       JOIN temp_security_users ts ON sjr.temp_security_id = ts.id 
+       WHERE sjr.id = $1`,
+      [requestId]
+    );
+
+    if (requestRes.rows.length === 0) throw new Error("Request not found");
+    const data = requestRes.rows[0];
+
+    // 2. Insert into permanent security_users (Added phone column and value)
+    const insertRes = await pool.query(
+      `INSERT INTO security_users 
+       (estate_id, name, email, password, phone, avatar, id_type, id_front_url, id_back_url, role)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'SECURITY') RETURNING id, name`,
+      [
+        data.estate_id, 
+        data.name, 
+        data.email, 
+        data.password, 
+        data.phone,
+        data.selfie_url, 
+        data.id_type, 
+        data.id_front_url, 
+        data.id_back_url
+      ]
+    );
+
+    // 3. Cleanup Temp Records
+    await pool.query("DELETE FROM temp_security_users WHERE id = $1", [data.temp_security_id]);
+    await pool.query("DELETE FROM security_join_requests WHERE id = $1", [requestId]);
+
+    await pool.query("COMMIT");
+    res.json({ success: true, message: `${insertRes.rows[0].name} is now an official guard.` });
+
+  } catch (err) {
+    await pool.query("ROLLBACK");
+    console.error("Promotion Error:", err);
+    res.status(500).json({ error: "Promotion failed" });
+  }
+});
+
+// -------------------- Decline Security Join Request --------------------
+router.delete("/join-request/delete", ensureAdmin, async (req, res) => {
+  const { id, message } = req.body;
+
+  try {
+    const infoRes = await pool.query(
+      `SELECT sjr.temp_security_id, e.name as estate_name 
+       FROM security_join_requests sjr 
+       JOIN estates e ON sjr.estate_id = e.id 
+       WHERE sjr.id = $1`, [id]
+    );
+
+    if (infoRes.rows.length === 0) return res.status(404).json({ error: "Request not found" });
+
+    const { temp_security_id, estate_name } = infoRes.rows[0];
+
+    const feedbackObj = JSON.stringify({
+      type: 'decline',
+      estate: estate_name,
+      message: message || "Your application was not approved at this time."
+    });
+
+    await pool.query(
+      "UPDATE temp_security_users SET rejection_message = $1, is_read = FALSE WHERE id = $2",
+      [feedbackObj, temp_security_id]
+    );
+
+    await pool.query("DELETE FROM security_join_requests WHERE id = $1", [id]);
+
+    res.json({ success: true, message: "Security request declined." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Block Security via Admin Table --------------------
+router.put("/join-request/block", ensureAdmin, async (req, res) => {
+  const { id, message } = req.body;
+  const adminId = req.user.id;
+
+  try {
+    const infoRes = await pool.query(
+      `SELECT sjr.temp_security_id, e.name as estate_name 
+       FROM security_join_requests sjr 
+       JOIN estates e ON sjr.estate_id = e.id 
+       WHERE sjr.id = $1`, [id]
+    );
+
+    if (infoRes.rows.length === 0) return res.status(404).json({ error: "Request not found" });
+
+    const { temp_security_id, estate_name } = infoRes.rows[0];
+
+    // 1. Add to Admin's Security Block List
+    await pool.query(
+      `UPDATE estate_admin_users 
+       SET blocked_security_ids = array_append(blocked_security_ids, $1) 
+       WHERE id = $2 AND NOT ($1 = ANY(blocked_security_ids))`,
+      [temp_security_id, adminId]
+    );
+
+    const feedbackObj = JSON.stringify({
+      type: 'block',
+      estate: estate_name,
+      message: message || "You have been restricted from this estate."
+    });
+
+    await pool.query(
+      "UPDATE temp_security_users SET rejection_message = $1, is_read = FALSE WHERE id = $2",
+      [feedbackObj, temp_security_id]
+    );
+
+    await pool.query("DELETE FROM security_join_requests WHERE id = $1", [id]);
+
+    res.json({ success: true, message: "Security user blocked." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Get Security Application Status --------------------
+router.get("/my-request", async (req, res) => {
+  const tempUserId = req.user.id;
+
+  try {
+    const activeRes = await pool.query(
+      `SELECT sjr.*, e.name as estate_name 
+       FROM security_join_requests sjr
+       JOIN estates e ON sjr.estate_id = e.id
+       WHERE sjr.temp_security_id = $1 AND sjr.status = 'PENDING'`,
+      [tempUserId]
+    );
+
+    const userRes = await pool.query(
+      "SELECT rejection_message, is_read FROM temp_security_users WHERE id = $1",
+      [tempUserId]
+    );
+
+    res.json({
+      success: true,
+      activeRequest: activeRes.rows[0] || null,
+      feedback: userRes.rows[0]?.rejection_message || null,
+      isRead: userRes.rows[0]?.is_read ?? false 
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// -------------------- Dismiss Security Notification --------------------
+router.delete("/notification/dismiss", async (req, res) => {
+    if (!req.user) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  const userId = req.user.id;
+  const isTemp = req.user.isTemp; 
+
+  try {
+    if (isTemp) {
+      await pool.query(
+        "UPDATE temp_security_users SET rejection_message = NULL WHERE id = $1",
+        [userId]
+      );
+      return res.json({ success: true, message: "Notification dismissed" });
+    }
+    res.json({ success: true, message: "Action not required for permanent security" });
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Mark Security Notification as Read --------------------
+router.put("/notification/read", async (req, res) => {
+  const userId = req.user.id;
+  if (req.user.isTemp) {
+    await pool.query(
+      "UPDATE temp_security_users SET is_read = TRUE WHERE id = $1",
+      [userId]
+    );
+    return res.json({ success: true, message: "Notification marked as read" });
+  }
+  res.json({ success: true });
+});
+
+// -------------------- Fetch Blocked Guards --------------------
+router.get("/blocked-users", ensureAdmin, async (req, res) => {
+  const adminId = req.user.id;
+
+  try {
+    const result = await pool.query(
+      `SELECT id, name, email 
+       FROM temp_security_users 
+       WHERE id = ANY(
+         SELECT unnest(blocked_security_ids) 
+         FROM estate_admin_users 
+         WHERE id = $1
+       )`,
+      [adminId]
+    );
+
+    res.json({ success: true, blockedUsers: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Unblock Security --------------------
+router.put("/join-request/unblock", ensureAdmin, async (req, res) => {
+  const { tempSecurityId } = req.body;
+  const adminId = req.user.id;
+
+  try {
+    await pool.query(
+      `UPDATE estate_admin_users 
+       SET blocked_security_ids = array_remove(blocked_security_ids, $1) 
+       WHERE id = $2`,
+      [tempSecurityId, adminId]
+    );
+
+    await pool.query(
+      "UPDATE temp_security_users SET rejection_message = NULL WHERE id = $1",
+      [tempSecurityId]
+    );
+
+    res.json({ success: true, message: "Security guard unblocked." });
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Fetch All Security --------------------
+router.get("/all", async (req, res) => {
+  try {
+    const estateId = req.user?.estate_id;
+    const currentUserId = req.user?.id;
+
+    if (!estateId) {
+      return res.status(401).json({ error: "Unauthorized: No estate assigned." });
+    }
+
+    let query;
+    let params;
+
+    // If a Security Guard is fetching the list, hide their own record
+    if (req.user.role === 'SECURITY') {
+      query = `
+        SELECT id, name, email, phone, avatar, estate_id, push_token, 
+               is_on_duty, checkin_location, checkout_location,current_known_location
+        FROM security_users 
+        WHERE estate_id = $1 AND id != $2
+        ORDER BY name ASC`;
+      params = [estateId, currentUserId];
+    } else {
+      // Admins see everyone
+      query = `
+        SELECT id, name, email, phone, avatar, estate_id, push_token, 
+               is_on_duty, checkin_location, checkout_location ,current_known_location
+        FROM security_users 
+        WHERE estate_id = $1 
+        ORDER BY name ASC`;
+      params = [estateId];
+    }
+
+    const result = await pool.query(query, params);
+
+    res.json({
+      success: true,
+      securityGuards: result.rows,
+    });
+  } catch (err) {
+    console.error("Fetch security error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Delete Security Guard --------------------
+router.delete("/delete/:id", ensureAdmin, async (req, res) => {
+  const { id } = req.params;
+  const admin_estate_id = req.user.estate_id; 
+
+  try {
+    await pool.query("BEGIN");
+
+    // 1. Get the Personnel details AND the Estate Name in one go
+    // We join estates via the admin's estate_id to get the correct branding for the message
+    const dataRes = await pool.query(
+      `SELECT 
+        u.name, u.email, u.password, u.phone, 
+        e.name as estate_name
+       FROM security_users u
+       JOIN estates e ON e.id = $2
+       WHERE u.id = $1`,
+      [id, admin_estate_id]
+    );
+
+    if (dataRes.rows.length === 0) {
+      await pool.query("ROLLBACK");
+      return res.status(404).json({ error: "Personnel or Estate context not found" });
+    }
+
+    const { name, email, password, phone, estate_name } = dataRes.rows[0];
+
+    // 2. Prepare the feedback object using the retrieved estate_name
+    const feedbackObj = JSON.stringify({
+      type: 'decline',
+      estate: estate_name,
+      message: "Your personnel access has been revoked."
+    });
+
+    // 3. Insert into temp_tenant_users (matching your specific schema)
+    await pool.query(
+      `INSERT INTO temp_tenant_users 
+       (name, email, password, phone, rejection_message, is_read)
+       VALUES ($1, $2, $3, $4, $5, FALSE)`,
+      [name, email, password, phone, feedbackObj]
+    );
+
+    // 4. Delete the official record
+    await pool.query("DELETE FROM security_users WHERE id = $1", [id]);
+
+    await pool.query("COMMIT");
+    res.json({ success: true, message: `Personnel ${name} removed and notified via ${estate_name}.` });
+
+  } catch (err) {
+    await pool.query("ROLLBACK");
+    console.error("Removal Error:", err);
+    res.status(500).json({ error: "Internal server error during removal" });
+  }
+});
+
+// -------------------- Security Check-In/Out Action --------------------
+router.post("/status-toggle", async (req, res) => {
+  const { code, location } = req.body;
+
+  if (!code || code.length !== 10) {
+    return res.status(400).json({ 
+      success: false, 
+      error: "Security code must be exactly 10 digits." 
+    });
+  }
+
+  const guardId = req.user.id;
+  const estateId = req.user.estate_id;
+
+  try {
+    const guardRes = await pool.query(
+      "SELECT is_on_duty, estate_id FROM security_users WHERE id = $1",
+      [guardId]
+    );
+
+    if (guardRes.rows.length === 0) return res.status(404).json({ error: "Guard not found" });
+    const isOnDuty = guardRes.rows[0].is_on_duty;
+
+    const adminCheck = await pool.query(
+      "SELECT id FROM estate_admin_users WHERE estate_id = $1 AND security_checkin_code = $2",
+      [estateId, code]
+    );
+
+    if (adminCheck.rows.length === 0) {
+      await pool.query("ROLLBACK");
+      return res.status(401).json({ error: "Invalid 10-digit code. Access denied." });
+    }
+
+    await pool.query("BEGIN");
+
+    if (!isOnDuty) {
+      const estateRes = await pool.query(
+        "SELECT security_code FROM estates WHERE id = $1",
+        [estateId]
+      );
+
+      if (estateRes.rows[0].security_code !== code) {
+        return res.status(401).json({ error: "Invalid check-in code for this estate." });
+      }
+
+      await pool.query(
+        "UPDATE security_users SET is_on_duty = TRUE, checkin_location = $1 WHERE id = $2",
+        [JSON.stringify(location), guardId]
+      );
+
+      await pool.query(
+        "INSERT INTO security_logs (security_id, checkin_time, checkin_location) VALUES ($1, NOW(), $2)",
+        [guardId, JSON.stringify(location)]
+      );
+
+    } else {
+      await pool.query(
+        `UPDATE security_logs 
+         SET checkout_time = NOW(), checkout_location = $1 
+         WHERE security_id = $2 AND checkout_time IS NULL`,
+        [JSON.stringify(location), guardId]
+      );
+
+      await pool.query(
+        "UPDATE security_users SET is_on_duty = FALSE, checkout_location = $1 WHERE id = $2",
+        [JSON.stringify(location), guardId]
+      );
+    }
+
+    await pool.query("COMMIT");
+    res.json({ success: true, isOnDuty: !isOnDuty });
+
+  } catch (err) {
+    await pool.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Failed to toggle duty status." });
+  }
+});
+
+// -------------------- Fetch Security Duty Logs --------------------
+router.get("/logs", ensureAdmin, async (req, res) => {
+  const estateId = req.user.estate_id;
+
+  try {
+    const result = await pool.query(
+      `SELECT 
+        sl.id, 
+        sl.checkin_time, 
+        sl.checkout_time, 
+        sl.checkin_location, 
+        sl.checkout_location,
+        s.name AS guard_name
+       FROM security_logs sl
+       JOIN security_users s ON sl.security_id = s.id
+       WHERE s.estate_id = $1
+       ORDER BY s.name ASC, sl.checkin_time DESC`,
+      [estateId]
+    );
+
+    res.json({
+      success: true,
+      logs: result.rows,
+    });
+  } catch (err) {
+    console.error("Fetch Security Logs Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Generate & Save 10-Digit Security Code --------------------
+router.put("/generate-checkin-code", ensureAdmin, async (req, res) => {
+  const adminId = req.user.id;
+
+  try {
+    // Generate a random 10-digit numeric string
+    let newCode = "";
+    for (let i = 0; i < 10; i++) {
+      newCode += Math.floor(Math.random() * 10).toString();
+    }
+
+    // Update the admin's record
+    const result = await pool.query(
+      `UPDATE estate_admin_users 
+       SET security_checkin_code = $1 
+       WHERE id = $2 
+       RETURNING security_checkin_code`,
+      [newCode, adminId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Admin not found." });
+    }
+
+    res.json({ 
+      success: true, 
+      code: result.rows[0].security_checkin_code,
+      message: "New 10-digit security code generated successfully."
+    });
+  } catch (err) {
+    console.error("Error generating code:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+export default router;

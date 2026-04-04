@@ -12,10 +12,24 @@ const flw = new Flutterwave(process.env.FW_PUBLIC, process.env.FW_SECRET);
 router.post('/', async (req, res) => {
     console.log('reg details:', req.body)
     try {
-        const { name, email, password, city, town } = req.body;
+        const { name, email, password, city, town, otp, metadata } = req.body;
+        const OTP_SECRET = process.env.OTP_SECRET
 
         if (!name || !email || !password) {
         return res.status(400).json({ error: "Name, email, and password are required" });
+        }
+
+        const [hash, expires] = metadata.split(".");
+            
+        if (Date.now() > parseInt(expires)) {
+          return res.status(400).json({ error: "OTP expired. Please resend." });
+        }
+    
+        const data = `${email}.${otp}.${expires}`;
+        const verifyHash = crypto.createHmac("sha256", OTP_SECRET).update(data).digest("hex");
+        
+        if (!crypto.timingSafeEqual(Buffer.from(verifyHash, 'hex'), Buffer.from(hash, 'hex'))) {
+          return res.status(400).json({ error: "Invalid OTP code." });
         }
 
         const emailCheck = await pool.query(
@@ -28,7 +42,7 @@ router.post('/', async (req, res) => {
         }
 
         const estateCheck = await pool.query(
-            `SELECT id FROM estates 
+            `SELECT id FROM estate_admin_users
              WHERE LOWER(name) = LOWER($1) AND LOWER(city) = LOWER($2) AND LOWER(town) = LOWER($3)`,
             [name, city, town]
         );
@@ -133,8 +147,8 @@ router.post('/flutterwave-webhook', async (req, res) => {
     // Insert into estate_admin_users with city/town
     await client.query(
       `INSERT INTO estate_admin_users 
-       (estate_id, name, email, password, city, town, subscription_expiry) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+       (estate_id, name, email, password, city, town, subscription_expiry, role) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         estateId,
         tempUser.name,
@@ -142,7 +156,8 @@ router.post('/flutterwave-webhook', async (req, res) => {
         tempUser.password,
         tempUser.city || null,
         tempUser.town || null,
-        subscriptionExpiry
+        subscriptionExpiry,
+        'ADMIN'
       ]
     );
 

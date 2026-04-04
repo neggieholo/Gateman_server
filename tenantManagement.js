@@ -117,7 +117,6 @@ router.get("/tenants", async (req, res) => {
   }
 });
 
-
 // -------------------- Delete Tenant --------------------
 router.delete("/tenant/:id", ensureAdmin, async (req, res) => {
   const { id } = req.params; // tenant id
@@ -152,7 +151,7 @@ router.post("/join-request", upload.fields([
   const { tempTenantId, estateId, block, unit, idType } = req.body;
   
   if (!tempTenantId || !estateId) {
-    return res.status(400).json({ error: "tempTenantId and estateId are required" });
+    return res.status(400).json({ error: "Id and Estate registration are required" });
   }
 
   try {
@@ -263,9 +262,9 @@ router.post("/approve-tenant/:joinRequestId", ensureAdmin, async (req, res) => {
       `INSERT INTO tenant_users (
         estate_id, name, email, password, unit, block, 
         avatar, id_type, id_front_url, id_back_url, utility_bill_url,
-        first_login
+        first_login, role
       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,$12)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,$12,$13)
        RETURNING *`,
       [
         estateId,
@@ -279,7 +278,8 @@ router.post("/approve-tenant/:joinRequestId", ensureAdmin, async (req, res) => {
         joinRequest.id_front_url,
         joinRequest.id_back_url,
         joinRequest.utility_bill_url,
-        true
+        true,
+        'TENANT'
       ]
     );
 
@@ -544,15 +544,32 @@ router.put("/join-request/unblock", ensureAdmin, async (req, res) => {
 });
 
 router.get("/estates", async (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
   try {
-    const result = await pool.query("SELECT id, name, estate_code, created_at FROM estates ORDER BY name ASC");
+    // Joining estates with estate_admin_users to get city and town
+    const query = `
+      SELECT 
+        e.id, 
+        e.name, 
+        e.estate_code, 
+        e.created_at,
+        u.city,
+        u.town
+      FROM estates e
+      LEFT JOIN estate_admin_users u ON e.id = u.estate_id
+      ORDER BY e.name ASC
+    `;
+
+    const result = await pool.query(query);
 
     res.json({
       success: true,
       estates: result.rows,
     });
   } catch (err) {
-    console.error(err);
+    console.error("Fetch Estates Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
