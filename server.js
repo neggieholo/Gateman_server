@@ -276,6 +276,7 @@ app.post("/api/reset-password", async (req, res) => {
 
 app.post("/api/change-password", async (req, res) => {
     const { currentPassword, newPassword, role } = req.body;
+    console.log('Current Password, NewPassword, Role:', currentPassword, newPassword, role);
     
     // 1. Ensure user is authenticated (Check your passport/session middleware)
     if (!req.user || !req.isAuthenticated()) {

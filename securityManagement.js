@@ -379,7 +379,7 @@ router.get("/all", async (req, res) => {
     if (req.user.role === 'SECURITY') {
       query = `
         SELECT id, name, email, phone, avatar, estate_id, push_token, 
-               is_on_duty, checkin_location, checkout_location,current_known_location
+               is_on_duty, checkin_location, checkout_location,last_known_location
         FROM security_users 
         WHERE estate_id = $1 AND id != $2
         ORDER BY name ASC`;
@@ -388,7 +388,7 @@ router.get("/all", async (req, res) => {
       // Admins see everyone
       query = `
         SELECT id, name, email, phone, avatar, estate_id, push_token, 
-               is_on_duty, checkin_location, checkout_location ,current_known_location
+               is_on_duty, checkin_location, checkout_location ,last_known_location
         FROM security_users 
         WHERE estate_id = $1 
         ORDER BY name ASC`;
@@ -464,25 +464,33 @@ router.delete("/delete/:id", ensureAdmin, async (req, res) => {
 
 // -------------------- Security Check-In/Out Action --------------------
 router.post("/status-toggle", async (req, res) => {
-  const { code, location } = req.body;
-
-  if (!code || code.length !== 10) {
-    return res.status(400).json({ 
-      success: false, 
-      error: "Security code must be exactly 10 digits." 
-    });
+  if (!req.user) {
+    return res.status(401).json({ error: "Unauthorized. Please log in." });
   }
-
+  
+  const { code, location } = req.body;
   const guardId = req.user.id;
   const estateId = req.user.estate_id;
 
+  const locString = location ? `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}` : "Unknown";
+
+  if (!code || code.length !== 10) {
+    return res.status(400).json({ success: false, error: "Security code must be 10 digits." });
+  }
+
   try {
+    await pool.query("BEGIN");
+
     const guardRes = await pool.query(
-      "SELECT is_on_duty, estate_id FROM security_users WHERE id = $1",
+      "SELECT is_on_duty FROM security_users WHERE id = $1",
       [guardId]
     );
 
-    if (guardRes.rows.length === 0) return res.status(404).json({ error: "Guard not found" });
+    if (guardRes.rows.length === 0) {
+      await pool.query("ROLLBACK");
+      return res.status(404).json({ error: "Guard not found" });
+    }
+
     const isOnDuty = guardRes.rows[0].is_on_duty;
 
     const adminCheck = await pool.query(
@@ -495,39 +503,31 @@ router.post("/status-toggle", async (req, res) => {
       return res.status(401).json({ error: "Invalid 10-digit code. Access denied." });
     }
 
-    await pool.query("BEGIN");
-
     if (!isOnDuty) {
-      const estateRes = await pool.query(
-        "SELECT security_code FROM estates WHERE id = $1",
-        [estateId]
-      );
-
-      if (estateRes.rows[0].security_code !== code) {
-        return res.status(401).json({ error: "Invalid check-in code for this estate." });
-      }
-
+      // --- START SHIFT ---
+      // Updates: Status, Checkin Location, Snapshot, AND last_checkin timestamp
       await pool.query(
-        "UPDATE security_users SET is_on_duty = TRUE, checkin_location = $1 WHERE id = $2",
-        [JSON.stringify(location), guardId]
+        `UPDATE security_users 
+         SET is_on_duty = TRUE, 
+             checkin_location = $1,
+             last_known_location = $2,
+             last_location_time = CURRENT_TIMESTAMP,
+             last_checkin = CURRENT_TIMESTAMP
+         WHERE id = $3`,
+        [locString, locString, guardId]
       );
-
-      await pool.query(
-        "INSERT INTO security_logs (security_id, checkin_time, checkin_location) VALUES ($1, NOW(), $2)",
-        [guardId, JSON.stringify(location)]
-      );
-
     } else {
+      // --- END SHIFT ---
+      // Updates: Status, Checkout Location, Snapshot, AND last_checkout timestamp
       await pool.query(
-        `UPDATE security_logs 
-         SET checkout_time = NOW(), checkout_location = $1 
-         WHERE security_id = $2 AND checkout_time IS NULL`,
-        [JSON.stringify(location), guardId]
-      );
-
-      await pool.query(
-        "UPDATE security_users SET is_on_duty = FALSE, checkout_location = $1 WHERE id = $2",
-        [JSON.stringify(location), guardId]
+        `UPDATE security_users 
+         SET is_on_duty = FALSE, 
+             checkout_location = $1,
+             last_known_location = $2,
+             last_location_time = CURRENT_TIMESTAMP,
+             last_checkout = CURRENT_TIMESTAMP
+         WHERE id = $3`,
+        [locString, locString, guardId]
       );
     }
 
@@ -535,8 +535,8 @@ router.post("/status-toggle", async (req, res) => {
     res.json({ success: true, isOnDuty: !isOnDuty });
 
   } catch (err) {
-    await pool.query("ROLLBACK");
-    console.error(err);
+    await pool.query("ROLLBACK").catch(() => {}); 
+    console.error("Toggle Error:", err);
     res.status(500).json({ error: "Failed to toggle duty status." });
   }
 });
@@ -603,6 +603,60 @@ router.put("/generate-checkin-code", ensureAdmin, async (req, res) => {
   } catch (err) {
     console.error("Error generating code:", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Fetch Existing 10-Digit Security Code --------------------
+router.get("/get-checkin-code", ensureAdmin, async (req, res) => {
+  const adminId = req.user.id;
+
+  try {
+    const result = await pool.query(
+      `SELECT security_checkin_code FROM estate_admin_users WHERE id = $1`,
+      [adminId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Admin not found." });
+    }
+
+    res.json({ 
+      success: true, 
+      code: result.rows[0].security_checkin_code 
+    });
+  } catch (err) {
+    console.error("Error fetching code:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.post("/update-location", async (req, res) => {
+  if (!req.isAuthenticated || !req.isAuthenticated() || req.user.role !== 'SECURITY') {
+    return res.status(401).json({ error: "Unauthorized: Security personnel only." });
+  }
+  const { latitude, longitude } = req.body;
+  const userId = req.user.id;
+
+  if (!latitude || !longitude) {
+    return res.status(400).json({ error: "Coordinates required" });
+  }
+
+  try {
+    const locationString = `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+    
+    // Updated to use 'last_known_location' and 'last_location_time'
+    await pool.query(
+      `UPDATE security_users 
+       SET last_known_location = $1, 
+           last_location_time = CURRENT_TIMESTAMP 
+       WHERE id = $2`,
+      [locationString, userId]
+    );
+
+    res.json({ success: true, message: "Location synchronized" });
+  } catch (err) {
+    console.error("Location Update Error:", err);
+    res.status(500).json({ error: "Failed to update location" });
   }
 });
 
