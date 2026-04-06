@@ -17,8 +17,10 @@ import firebaseAdmin from "./firebase.js";
 import communityRoute from './community.js'
 import invitationsRoute from './invitations.js';
 import securityRoute from './securityManagement.js'
+import NotificationsRoute from './Notifications.js'
 import crypto from "crypto";
 import { sendPasswordResetCode } from "./emailService.js";
+import { checkOverstays } from './invitations.js';
 import bcrypt from "bcrypt";
 
 
@@ -90,6 +92,7 @@ app.use("/api/invoices", invoicesRoute);
 app.use("/api/community", communityRoute);
 app.use("/api/invitations", invitationsRoute);
 app.use("/api/security", securityRoute);
+app.use("/api/notifications", NotificationsRoute);
 
 app.get("/api/session-check", (req, res) => {
     if (req.isAuthenticated && req.isAuthenticated()) {
@@ -409,4 +412,13 @@ io.on("connection", (socket) => {
 
 
 // !!! IMPORTANT: Change app.listen to httpServer.listen !!!
-httpServer.listen(3003, '0.0.0.0', () => console.log("Server running on port 3003"));
+httpServer.listen(3003, '0.0.0.0', () => 
+    {
+        console.log("Server running on port 3003");
+        checkOverstays();
+        setInterval(() => {
+            checkOverstays();
+        }, 10 * 60 * 1000);
+    });
+
+export { io };

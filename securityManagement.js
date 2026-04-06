@@ -156,7 +156,17 @@ router.post("/approve/:requestId", ensureAdmin, async (req, res) => {
     );
 
     // 3. Cleanup Temp Records
-    await pool.query("DELETE FROM temp_security_users WHERE id = $1", [data.temp_security_id]);
+    const feedbackObj = JSON.stringify({
+      type: 'approve',
+      estate: data.estate_name,
+      message: "Congratulations! You have been approved."
+    });
+
+    await pool.query(
+      "UPDATE temp_security_users SET rejection_message = $1, is_read = FALSE WHERE id = $2",
+      [feedbackObj, data.temp_security_id]
+    );
+
     await pool.query("DELETE FROM security_join_requests WHERE id = $1", [requestId]);
 
     await pool.query("COMMIT");
@@ -209,6 +219,7 @@ router.delete("/join-request/delete", ensureAdmin, async (req, res) => {
 router.put("/join-request/block", ensureAdmin, async (req, res) => {
   const { id, message } = req.body;
   const adminId = req.user.id;
+    console.log('Block apihit for id:', id)
 
   try {
     const infoRes = await pool.query(
@@ -379,7 +390,7 @@ router.get("/all", async (req, res) => {
     if (req.user.role === 'SECURITY') {
       query = `
         SELECT id, name, email, phone, avatar, estate_id, push_token, 
-               is_on_duty, checkin_location, checkout_location,last_known_location
+               is_on_duty, last_checkin, last_checkout, checkin_location, checkout_location,last_known_location
         FROM security_users 
         WHERE estate_id = $1 AND id != $2
         ORDER BY name ASC`;
@@ -388,7 +399,7 @@ router.get("/all", async (req, res) => {
       // Admins see everyone
       query = `
         SELECT id, name, email, phone, avatar, estate_id, push_token, 
-               is_on_duty, checkin_location, checkout_location ,last_known_location
+               is_on_duty, last_checkin, last_checkout, checkin_location, checkout_location ,last_known_location
         FROM security_users 
         WHERE estate_id = $1 
         ORDER BY name ASC`;
@@ -443,7 +454,7 @@ router.delete("/delete/:id", ensureAdmin, async (req, res) => {
 
     // 3. Insert into temp_tenant_users (matching your specific schema)
     await pool.query(
-      `INSERT INTO temp_tenant_users 
+      `INSERT INTO temp_security_users 
        (name, email, password, phone, rejection_message, is_read)
        VALUES ($1, $2, $3, $4, $5, FALSE)`,
       [name, email, password, phone, feedbackObj]
@@ -657,6 +668,49 @@ router.post("/update-location", async (req, res) => {
   } catch (err) {
     console.error("Location Update Error:", err);
     res.status(500).json({ error: "Failed to update location" });
+  }
+});
+
+
+// -------------------- Update Security Push Token --------------------
+router.post("/update-push-token", async (req, res) => {
+  const userId = req.user?.id;
+  const role = req.user?.role;
+  const { pushToken } = req.body;
+
+  if (!userId || role !== 'SECURITY') {
+    return res.status(401).json({ 
+      error: "Unauthorized: Only security personnel can update tokens here." 
+    });
+  }
+
+  if (!pushToken) {
+    return res.status(400).json({ error: "pushToken is required" });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE security_users 
+       SET push_token = $1 
+       WHERE id = $2 
+       RETURNING id, name`,
+      [pushToken, userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Security record not found" });
+    }
+
+    console.log(`[Push Token] Updated for Guard: ${result.rows[0].name}`);
+
+    res.json({
+      success: true,
+      message: "Security push token synchronized",
+      user: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Security Push Token Error:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 

@@ -53,6 +53,11 @@ const configurePassport = (passport) => {
                 "UPDATE tenant_users SET first_login = FALSE WHERE id = $1",
                 [user.id]
               );
+              
+              await pool.query(
+              "DELETE FROM temp_tenant_users WHERE email = $1",
+              [email]
+            );
 
               user.showWelcome = true;
             } catch (dbErr) {
@@ -142,6 +147,11 @@ const configurePassport = (passport) => {
                 "UPDATE security_users SET first_login = FALSE WHERE id = $1",
                 [user.id]
               );
+
+              await pool.query(
+              "DELETE FROM temp_security_users WHERE email = $1",
+              [email]
+            );
 
               user.showWelcome = true;
             } catch (dbErr) {

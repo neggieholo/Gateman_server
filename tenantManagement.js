@@ -1,6 +1,5 @@
 import express from "express";
 import multer from 'multer';
-import path from 'path';
 import pool from "./db.js";
 import { v2 as cloudinary } from 'cloudinary';
 
@@ -260,17 +259,18 @@ router.post("/approve-tenant/:joinRequestId", ensureAdmin, async (req, res) => {
     // 3. Promote to permanent tenant_users with full KYC data
     const insertRes = await pool.query(
       `INSERT INTO tenant_users (
-        estate_id, name, email, password, unit, block, 
+        estate_id, name, email, password,phone, unit, block, 
         avatar, id_type, id_front_url, id_back_url, utility_bill_url,
         first_login, role
       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,$12,$13)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,$12,$13,$14)
        RETURNING *`,
       [
         estateId,
         temp.name,
         temp.email,
         temp.password,
+        temp.phone,
         joinRequest.unit,
         joinRequest.block,
         joinRequest.selfie_url,
@@ -286,7 +286,17 @@ router.post("/approve-tenant/:joinRequestId", ensureAdmin, async (req, res) => {
     const newTenant = insertRes.rows[0];
 
     // 4. CLEANUP: Remove temp records
-    await pool.query("DELETE FROM temp_tenant_users WHERE id = $1", [temp.id]);
+    const feedbackObj = JSON.stringify({
+      type: 'approve',
+      estate: joinRequest.estate_name,
+      message: "Your residency has been approved! Please log out and log back in to access the tenant dashboard."
+    });
+
+    await pool.query(
+      "UPDATE temp_tenant_users SET rejection_message = $1, is_read = FALSE WHERE id = $2",
+      [feedbackObj, temp.id]
+    );
+    
     await pool.query("DELETE FROM join_requests WHERE id = $1", [joinRequestId]);
 
     await pool.query("COMMIT");

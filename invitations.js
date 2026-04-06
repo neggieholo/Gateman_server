@@ -3,6 +3,9 @@ import pool from "./db.js";
 import { isAuth } from "./middlewares.js";
 import crypto from "crypto";
 import cron from "node-cron";
+import { io } from "./server.js";
+
+
 const router = express.Router();
 
 // --- 1. GET ALL INVITATIONS ---
@@ -323,50 +326,77 @@ const sendPushNotification = async (token, title, body, data = {}) => {
 };
 
 // --- OVERSTAY ALERT ---
-cron.schedule('*/10 * * * *', async () => {
-  try {
-    const overstayQuery = `
-      SELECT i.id, i.guest_name, i.estate_id, u.push_token as resident_token
-      FROM invitations i
-      JOIN tenant_users u ON i.resident_id = u.id
-      WHERE i.status = 'checked_in' 
-      AND i.is_cancelled = false
-      AND (i.end_date + i.end_time) < NOW();
-    `;
+// cron.schedule('*/10 * * * *', async () => {
+//   const client = await pool.connect(); 
+//   try {
+//     const overstayQuery = `
+//       SELECT i.id, i.guest_name, i.estate_id, i.resident_id, u.push_token as resident_token
+//       FROM invitations i
+//       JOIN tenant_users u ON i.resident_id = u.id
+//       WHERE i.status = 'checked_in' 
+//       AND i.is_cancelled = false
+//       AND (i.end_date + i.end_time) < NOW();
+//     `;
     
-    const { rows: overstays } = await pool.query(overstayQuery);
-    if (overstays.length === 0) return;
+//     const { rows: overstays } = await client.query(overstayQuery);
+//     if (overstays.length === 0) return;
 
-    for (const record of overstays) {
-      const securityQuery = `
-        SELECT push_token 
-        FROM security_users 
-        WHERE estate_id = $1 AND is_on_duty = true
-      `;
-      const { rows: onDutyGuards } = await pool.query(securityQuery, [record.estate_id]);
+//     for (const record of overstays) {
+//       const alertTitle = "Overstay Alert 🚨";
+//       const alertBody = `${record.guest_name} has exceeded their stay time.`;
 
-      const alertTitle = "Overstay Alert 🚨";
-      const alertBody = `${record.guest_name} has exceeded their stay time.`;
+//       // --- 1. RESIDENT LOGIC ---
+//       const resDb = await client.query(
+//         `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
+//          VALUES ($1, $2, 'tenant', $3, $4, 'emergency')
+//          RETURNING *`, // <--- Get the full object back
+//         [record.estate_id, record.resident_id, alertTitle, alertBody]
+//       );
 
-      // Notify Resident
-      if (record.resident_token) {
-        sendPushNotification(record.resident_token, alertTitle, alertBody, { type: "overstay", id: record.id });
-      }
+//       const residentNotif = resDb.rows[0];
 
-      // Notify ONLY the guards on shift
-      onDutyGuards.forEach(guard => {
-        if (guard.push_token) {
-          sendPushNotification(guard.push_token, alertTitle, `[Duty Alert] ${alertBody}`, { type: "overstay", id: record.id });
-        }
-      });
+//       // Real-time Push via Socket
+//       io.to(`user_${record.resident_id}`).emit("new_notification", residentNotif);
 
-      await pool.query("UPDATE invitations SET status = 'overstayed' WHERE id = $1", [record.id]);
-    }
-  } catch (err) {
-    console.error("Overstay Cron Error:", err);
-  }
-});
+//       // Firebase Push
+//       if (record.resident_token) {
+//         console.log('Sent Push to:', record.resident_id)
+//         sendPushNotification(record.resident_token, alertTitle, alertBody, { type: "notification" });
+//       }
 
+//       // --- 2. SECURITY LOGIC ---
+//       const { rows: onDutyGuards } = await client.query(
+//         "SELECT id, push_token FROM security_users WHERE estate_id = $1 AND is_on_duty = true",
+//         [record.estate_id]
+//       );
+
+//       for (const guard of onDutyGuards) {
+//         const guardDb = await client.query(
+//           `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
+//            VALUES ($1, $2, 'security', $3, $4, 'emergency')
+//            RETURNING *`,
+//           [record.estate_id, guard.id, alertTitle, `[Duty Alert] ${alertBody}`]
+//         );
+
+//         const guardNotif = guardDb.rows[0];
+
+//         // Real-time Push to Guard's Socket
+//         io.to(`user_${guard.id}`).emit("new_notification", guardNotif);
+
+//         if (guard.push_token) {
+//           console.log('Sent Push to:', guard.id)
+//           sendPushNotification(guard.push_token, alertTitle, `[Duty Alert] ${alertBody}`, { type: "notification" });
+//         }
+//       }
+
+//       await client.query("UPDATE invitations SET status = 'overstayed' WHERE id = $1", [record.id]);
+//     }
+//   } catch (err) {
+//     console.error("Overstay Cron Error:", err);
+//   } finally {
+//     client.release();
+//   }
+// });
 // --- DELETE INVALID INVITATIONS ---
 cron.schedule('0 2 * * *', async () => {
   try {
@@ -383,5 +413,77 @@ cron.schedule('0 2 * * *', async () => {
     console.error("Cleanup Cron Error:", err);
   }
 });
+
+// 1. Define the logic as a named function
+const checkOverstays = async () => {
+  console.log("Check Overstays")
+  const client = await pool.connect(); 
+  try {
+    const overstayQuery = `
+      SELECT i.id, i.guest_name, i.estate_id, i.resident_id, u.push_token as resident_token
+      FROM invitations i
+      JOIN tenant_users u ON i.resident_id = u.id
+      WHERE i.status = 'checked_in' 
+      AND i.is_cancelled = false
+      AND (i.end_date + i.end_time) < NOW();
+    `;
+    
+    const { rows: overstays } = await client.query(overstayQuery);
+    if (overstays.length === 0) return;
+
+    for (const record of overstays) {
+      const alertTitle = "Overstay Alert 🚨";
+      const alertBody = `${record.guest_name} has exceeded their stay time.`;
+
+      // --- 1. RESIDENT LOGIC ---
+      const resDb = await client.query(
+        `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
+         VALUES ($1, $2, 'tenant', $3, $4, 'emergency')
+         RETURNING *`,
+        [record.estate_id, record.resident_id, alertTitle, alertBody]
+      );
+
+      const residentNotif = resDb.rows[0];
+      io.to(`user_${record.resident_id}`).emit("new_notification", residentNotif);
+
+      if (record.resident_token) {
+        console.log('Sent Push to:', record.resident_id);
+        sendPushNotification(record.resident_token, alertTitle, alertBody, { type: "notification" });
+      }
+
+      // --- 2. SECURITY LOGIC ---
+      const { rows: onDutyGuards } = await client.query(
+        "SELECT id, push_token FROM security_users WHERE estate_id = $1 AND is_on_duty = true",
+        [record.estate_id]
+      );
+
+      for (const guard of onDutyGuards) {
+        const guardDb = await client.query(
+          `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
+           VALUES ($1, $2, 'security', $3, $4, 'emergency')
+           RETURNING *`,
+          [record.estate_id, guard.id, alertTitle, `[Duty Alert] ${alertBody}`]
+        );
+
+        const guardNotif = guardDb.rows[0];
+        io.to(`user_${guard.id}`).emit("new_notification", guardNotif);
+
+        if (guard.push_token) {
+          console.log('Sent Push to:', guard.id);
+          sendPushNotification(guard.push_token, alertTitle, `[Duty Alert] ${alertBody}`, { type: "notification" });
+        }
+      }
+
+      await client.query("UPDATE invitations SET status = 'overstayed' WHERE id = $1", [record.id]);
+    }
+  } catch (err) {
+    console.error("Overstay Check Error:", err);
+  } finally {
+    client.release();
+  }
+};
+
+
+export { checkOverstays };
 
 export default router;
