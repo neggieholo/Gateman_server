@@ -309,6 +309,7 @@ const sendPushNotification = async (token, title, body, data = {}) => {
       title: title,
       body: body,
       data: data,
+      priority: "high",
       channelId: "default",
     };
 
@@ -435,6 +436,13 @@ const checkOverstays = async () => {
       const alertTitle = "Overstay Alert 🚨";
       const alertBody = `${record.guest_name} has exceeded their stay time.`;
 
+      const emergencyData = {
+        type: "notification",
+        subtype: "emergency",
+        user_id: record.resident_id, 
+        message: alertBody,
+      };
+
       // --- 1. RESIDENT LOGIC ---
       const resDb = await client.query(
         `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
@@ -448,7 +456,12 @@ const checkOverstays = async () => {
 
       if (record.resident_token) {
         console.log('Sent Push to:', record.resident_id);
-        sendPushNotification(record.resident_token, alertTitle, alertBody, { type: "notification" });
+        sendPushNotification(
+          record.resident_token,
+          alertTitle,
+          alertBody,
+          emergencyData,
+        );
       }
 
       // --- 2. SECURITY LOGIC ---
@@ -470,7 +483,12 @@ const checkOverstays = async () => {
 
         if (guard.push_token) {
           console.log('Sent Push to:', guard.id);
-          sendPushNotification(guard.push_token, alertTitle, `[Duty Alert] ${alertBody}`, { type: "notification" });
+          sendPushNotification(
+            guard.push_token,
+            alertTitle,
+            `[Duty Alert] ${alertBody}`,
+            { ...emergencyData, user_id: guard.id },
+          );
         }
       }
 

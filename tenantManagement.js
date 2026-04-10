@@ -18,11 +18,11 @@ const upload = multer({ storage });
 const uploadToCloudinary = (fileBuffer) => {
   return new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
-      { folder: "estate_mate_kyc" },
+      { folder: "gateman_tenant_kyc" },
       (error, result) => {
         if (error) return reject(error);
         resolve(result.secure_url);
-      }
+      },
     );
     uploadStream.end(fileBuffer);
   });
@@ -57,13 +57,13 @@ router.get("/join-requests", ensureAdmin, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `SELECT jr.*, tt.name AS temp_tenant_name, tt.email AS temp_tenant_email
+      `SELECT jr.*, tt.name AS temp_tenant_name, tt.email AS temp_tenant_email, tt.phone AS temp_tenant_phone
        FROM join_requests jr
        JOIN temp_tenant_users tt ON jr.temp_tenant_id = tt.id
        JOIN estate_admin_users eau ON jr.estate_id = eau.estate_id
        WHERE eau.id = $1
        ORDER BY jr.requested_at DESC`,
-      [adminId]
+      [adminId],
     );
 
     res.json({
@@ -398,7 +398,6 @@ router.put("/join-request/block", ensureAdmin, async (req, res) => {
 });
 
 router.get("/my-request", ensureTempTenant, async (req, res) => {
-  console.log("Fetching active join request for temp tenant:", req.user);
   const tempUserId = req.user.id;
 
   try {

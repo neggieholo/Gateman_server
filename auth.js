@@ -33,7 +33,7 @@ router.post("/otp/send", async (req, res) => {
 
 // ------------------ Register Tenant ------------------
 router.post("/register/tenant", async (req, res, next) => {
-  const { email, password, name, otp, metadata } = req.body;
+  const { email, password, name, phone, otp, metadata } = req.body;
 
   try {
     // 1. Verify the Metadata "Proof"
@@ -46,26 +46,26 @@ router.post("/register/tenant", async (req, res, next) => {
     const data = `${email}.${otp}.${expires}`;
     const verifyHash = crypto.createHmac("sha256", OTP_SECRET).update(data).digest("hex");
 
-if (!crypto.timingSafeEqual(Buffer.from(verifyHash, 'hex'), Buffer.from(hash, 'hex'))) {
-  return res.status(400).json({ error: "Invalid OTP code." });
-}
+  if (!crypto.timingSafeEqual(Buffer.from(verifyHash, 'hex'), Buffer.from(hash, 'hex'))) {
+    return res.status(400).json({ error: "Invalid OTP code." });
+  }
     // 2. Security Check: Ensure email isn't already taken
     const existingUser = await pool.query(
-      `SELECT email FROM tenant_users WHERE email = $1 
+      `SELECT email FROM tenant_users WHERE email = $1 OR phone = $2
        UNION SELECT email FROM temp_tenant_users WHERE email = $1`,
-      [email.toLowerCase().trim()]
+      [email.trim(), phone.trim()]
     );
 
     if (existingUser.rows.length > 0) {
-       return res.status(400).json({ error: "User already exists." });
+       return res.status(400).json({ error: "Email or Phone number already registered." });
     }
 
     // 3. Hash Password and Insert
     const passwordHash = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      `INSERT INTO temp_tenant_users (email, password, name, role) 
-       VALUES ($1, $2, $3, 'TENANT') RETURNING id, email, name`,
-      [email, passwordHash, name]
+      `INSERT INTO temp_tenant_users (email, password, name, phone, role) 
+       VALUES ($1, $2, $3, $4, 'TENANT') RETURNING id, email, name`,
+      [email, passwordHash, name, phone]
     );
 
     const user = result.rows[0];
@@ -83,6 +83,7 @@ if (!crypto.timingSafeEqual(Buffer.from(verifyHash, 'hex'), Buffer.from(hash, 'h
 
   } catch (err) {
     console.error(err);
+    console.log("Registration error:", err)
     res.status(500).json({ error: "Registration failed." });
   }
 });
@@ -176,7 +177,7 @@ router.post("/register/security", async (req, res, next) => {
     const result = await pool.query(
       `INSERT INTO temp_security_users (email, password, name, phone, role) 
        VALUES ($1, $2, $3, $4, 'SECURITY') RETURNING id, email, name, phone, role`,
-      [email.toLowerCase().trim(), passwordHash, name, phone.trim()]
+      [email.trim(), passwordHash, name, phone.trim()]
     );
 
     const user = result.rows[0];

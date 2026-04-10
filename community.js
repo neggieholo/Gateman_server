@@ -1,6 +1,6 @@
 import express from "express";
 import pool from "./db.js";
-import { isAuth } from "./middlewares.js";
+import { isAuth, broadcastDirectNotification } from "./middlewares.js";
 
 const router = express.Router();
 
@@ -223,5 +223,11 @@ router.delete("/comments/:id", isAuth, async (req, res) => {
     client.release();
   }
 });
+
+router.post(
+  "/send-direct-notification",
+  isAuth,
+  broadcastDirectNotification,
+);
 
 export default router;

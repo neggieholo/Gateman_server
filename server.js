@@ -18,6 +18,7 @@ import communityRoute from './community.js'
 import invitationsRoute from './invitations.js';
 import securityRoute from './securityManagement.js'
 import NotificationsRoute from './Notifications.js'
+import KYCRoute from './AdminKYC.js'
 import crypto from "crypto";
 import { sendPasswordResetCode } from "./emailService.js";
 import { checkOverstays } from './invitations.js';
@@ -93,10 +94,11 @@ app.use("/api/community", communityRoute);
 app.use("/api/invitations", invitationsRoute);
 app.use("/api/security", securityRoute);
 app.use("/api/notifications", NotificationsRoute);
+app.use("/api/kyc", KYCRoute);
 
 app.get("/api/session-check", (req, res) => {
     if (req.isAuthenticated && req.isAuthenticated()) {
-        res.json({ success: true});
+        res.json({ success: true, user: req.user});
     } else {
         res.status(401).json({ success: false });
     }
