@@ -5,7 +5,6 @@ import bcrypt from "bcrypt";
 import pool from "./db.js";
 
 const configurePassport = (passport) => {
-
   // TENANT LOGIN STRATEGY (checks tenant_users → temp_tenant_users)
   passport.use(
     "tenant-local",
@@ -19,7 +18,7 @@ const configurePassport = (passport) => {
             FROM tenant_users t
             JOIN estates e ON t.estate_id = e.id
             WHERE t.email = $1`,
-            [email]
+            [email],
           );
 
           let user = result.rows[0];
@@ -27,12 +26,12 @@ const configurePassport = (passport) => {
           if (!user) {
             const tempResult = await pool.query(
               "SELECT * FROM temp_tenant_users WHERE email = $1",
-              [email]
+              [email],
             );
             user = tempResult.rows[0];
 
             if (user) {
-              user.isTemp = true; 
+              user.isTemp = true;
             }
           }
 
@@ -51,13 +50,13 @@ const configurePassport = (passport) => {
             try {
               await pool.query(
                 "UPDATE tenant_users SET first_login = FALSE WHERE id = $1",
-                [user.id]
+                [user.id],
               );
-              
+
               await pool.query(
-              "DELETE FROM temp_tenant_users WHERE email = $1",
-              [email]
-            );
+                "DELETE FROM temp_tenant_users WHERE email = $1",
+                [email],
+              );
 
               user.showWelcome = true;
             } catch (dbErr) {
@@ -66,12 +65,11 @@ const configurePassport = (passport) => {
           }
 
           return done(null, user);
-
         } catch (err) {
           return done(err);
         }
-      }
-    )
+      },
+    ),
   );
 
   // ESTATE ADMIN LOGIN STRATEGY
@@ -83,22 +81,22 @@ const configurePassport = (passport) => {
         try {
           const result = await pool.query(
             "SELECT * FROM estate_admin_users WHERE email = $1",
-            [email]
+            [email],
           );
 
           const user = result.rows[0];
           if (!user) return done(null, false, { message: "Admin not found" });
 
           const match = await bcrypt.compare(password, user.password);
-          if (!match) return done(null, false, { message: "Incorrect password" });
+          if (!match)
+            return done(null, false, { message: "Incorrect password" });
 
           return done(null, user);
-
         } catch (err) {
           return done(err);
         }
-      }
-    )
+      },
+    ),
   );
 
   // SECURITY LOGIN STRATEGY (checks security_users → temp_security_users)
@@ -114,7 +112,7 @@ const configurePassport = (passport) => {
              FROM security_users s
              JOIN estates e ON s.estate_id = e.id
              WHERE s.email = $1`,
-            [email]
+            [email],
           );
 
           let user = result.rows[0];
@@ -123,7 +121,7 @@ const configurePassport = (passport) => {
           if (!user) {
             const tempResult = await pool.query(
               "SELECT * FROM temp_security_users WHERE email = $1",
-              [email]
+              [email],
             );
             user = tempResult.rows[0];
             if (user) user.isTemp = true;
@@ -145,13 +143,13 @@ const configurePassport = (passport) => {
             try {
               await pool.query(
                 "UPDATE security_users SET first_login = FALSE WHERE id = $1",
-                [user.id]
+                [user.id],
               );
 
               await pool.query(
-              "DELETE FROM temp_security_users WHERE email = $1",
-              [email]
-            );
+                "DELETE FROM temp_security_users WHERE email = $1",
+                [email],
+              );
 
               user.showWelcome = true;
             } catch (dbErr) {
@@ -163,54 +161,114 @@ const configurePassport = (passport) => {
         } catch (err) {
           return done(err);
         }
-      }
-    )
+      },
+    ),
+  );
+
+  // SUPER ADMIN LOGIN
+  passport.use(
+    "super-admin-local",
+    new LocalStrategy(
+      {
+        usernameField: "email",
+        passwordField: "password",
+        passReqToCallback: true, 
+      },
+      async (req, email, password, done) => {
+        try {
+          const { name } = req.body; // This is the "Signature" from your form
+
+          const result = await pool.query(
+            "SELECT * FROM super_admins WHERE email = $1 AND is_active = true",
+            [email.trim()],
+          );
+
+          const admin = result.rows[0];
+
+          // 1. Check if admin exists
+          if (!admin) {
+            return done(null, false, {
+              message: "Access denied or account not found.",
+            });
+          }
+
+          // 2. Verify Signature (Case-insensitive check)
+          if (admin.full_name.toLowerCase() !== name.toLowerCase().trim()) {
+            return done(null, false, {
+              message: "Admin signature does not match this account.",
+            });
+          }
+
+          // 3. Verify Password
+          const match = await bcrypt.compare(password, admin.password_hash);
+          if (!match) {
+            return done(null, false, {
+              message: "Incorrect master credentials.",
+            });
+          }
+
+          // Update last login
+          await pool.query(
+            "UPDATE super_admins SET last_login = NOW() WHERE id = $1",
+            [admin.id],
+          );
+
+          return done(null, admin);
+        } catch (err) {
+          return done(err);
+        }
+      },
+    ),
   );
 
   // SESSION SERIALIZE
   passport.serializeUser((user, done) => {
-  done(null, {
-    id: user.id,
-    type: user.role,
-    isTemp: user.isTemp || false
+    done(null, {
+      id: user.id,
+      type: user.role,
+      isTemp: user.isTemp || false,
+    });
   });
-});
 
-// SESSION DESERIALIZE
-passport.deserializeUser(async (user, done) => {
-  try {
-    let result;
+  // SESSION DESERIALIZE
+  passport.deserializeUser(async (user, done) => {
+    try {
+      let result;
 
-    if (user.type === "SECURITY") {
-      const query = user.isTemp 
-        ? `SELECT * FROM temp_security_users WHERE id = $1`
-        : `SELECT s.*, e.name as estate_name FROM security_users s JOIN estates e ON s.estate_id = e.id WHERE s.id = $1`;
-      
-      result = await pool.query(query, [user.id]);
+      if (user.type === "SECURITY") {
+        const query = user.isTemp
+          ? `SELECT * FROM temp_security_users WHERE id = $1`
+          : `SELECT s.*, e.name as estate_name FROM security_users s JOIN estates e ON s.estate_id = e.id WHERE s.id = $1`;
 
-    } else if (user.type === "TENANT") {
-      const query = user.isTemp 
-        ? `SELECT * FROM temp_tenant_users WHERE id = $1`
-        : `SELECT t.*, e.name as estate_name FROM tenant_users t JOIN estates e ON t.estate_id = e.id WHERE t.id = $1`;
-      
-      result = await pool.query(query, [user.id]);
+        result = await pool.query(query, [user.id]);
+      } else if (user.type === "TENANT") {
+        const query = user.isTemp
+          ? `SELECT * FROM temp_tenant_users WHERE id = $1`
+          : `SELECT t.*, e.name as estate_name FROM tenant_users t JOIN estates e ON t.estate_id = e.id WHERE t.id = $1`;
 
-    } else {
-      // ADMIN
-      result = await pool.query("SELECT * FROM estate_admin_users WHERE id = $1", [user.id]);
+        result = await pool.query(query, [user.id]);
+      } else if (user.type === "SUPER_ADMIN") {
+        const query = "SELECT * FROM super_admins WHERE id = $1";
+
+        result = await pool.query(query, [user.id]);
+      } else {
+        // ADMIN
+        result = await pool.query(
+          "SELECT * FROM estate_admin_users WHERE id = $1",
+          [user.id],
+        );
+      }
+
+      if (!result.rows[0]) return done(null, false);
+
+      const finalUser = result.rows[0];
+      if (user.isTemp) finalUser.isTemp = true;
+
+      done(null, finalUser);
+    } catch (err) {
+      done(err);
     }
-
-    if (!result.rows[0]) return done(null, false);
-
-    const finalUser = result.rows[0];
-    if (user.isTemp) finalUser.isTemp = true;
-
-    done(null, finalUser);
-  } catch (err) {
-    done(err);
-  }
-});
-
+  });
 };
 
 export default configurePassport;

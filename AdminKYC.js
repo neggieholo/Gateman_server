@@ -5,7 +5,6 @@ import { v2 as cloudinary } from "cloudinary";
 import { WebApi } from "smile-identity-core";
 import { isAuth, kycLookupLimiter } from "./middlewares.js";
 
-
 const router = express.Router();
 
 cloudinary.config({
@@ -87,18 +86,28 @@ const verifyAdminNIN = async (nin) => {
   }
 };
 
-// --- ENDPOINT 1: ESTATE DOCS (Saves to 'estates' & updates 'estate_admin_users') ---
+// --- ENDPOINT 1: ESTATE DOCS & SETTLEMENT ACCOUNT ---
 router.post(
-  "/save-estate-docs", isAuth, kycLookupLimiter,
+  "/save-estate-docs",
+  isAuth,
+  kycLookupLimiter,
   upload.fields([
     { name: "cacCert", maxCount: 1 },
+    { name: "tinCert", maxCount: 1 },
     { name: "estateUtility", maxCount: 1 },
   ]),
   async (req, res) => {
     try {
-      const { cacNumber, tinNumber } = req.body;
-      const adminId = req.user.id
-      const estateId = req.user.estateId
+      const {
+        cacNumber,
+        tinNumber,
+        accountNumber,
+        bankCode,
+        accountName,
+        bankName,
+      } = req.body;
+      const adminId = req.user.id;
+      const estateId = req.user.estateId;
       const files = req.files;
 
       // Real-time CAC Verification
@@ -110,30 +119,41 @@ router.post(
       }
 
       const cacUrl = await uploadToCloudinary(files.cacCert[0].buffer);
+      const tinUrl = await uploadToCloudinary(files.tinCert[0].buffer);
       const utilUrl = files.estateUtility
         ? await uploadToCloudinary(files.estateUtility[0].buffer)
         : null;
 
-      // Update Estate Table with all the new fields
+      // Update Estate Table (Entity Details + Bank Details)
       await db.query(
         `UPDATE estates SET 
-        cac_number = $1, 
-        tin_number = $2, 
-        cac_cert_url = $3, 
-        estate_utility_url = $4, 
-        cac_verification_status = 'verified',
-        business_type = $5,
-        registered_address = $6,
-        registration_date = $7
-       WHERE id = $8`,
+          cac_number = $1, 
+          tin_number = $2, 
+          cac_cert_url = $3, 
+          tin_cert_url = $4, 
+          estate_utility_url = $5, 
+          cac_verification_status = 'verified',
+          business_type = $6,
+          registered_address = $7,
+          registration_date = $8,
+          bank_account_number = $9,
+          bank_code = $10,
+          bank_account_name = $11,
+          bank_name = $12
+         WHERE id = $13`,
         [
           cacNumber,
           tinNumber,
           cacUrl,
+          tinUrl,
           utilUrl,
           cacData.type || "Company",
-          cacData.address, 
+          cacData.address,
           cacData.registration_date,
+          accountNumber,
+          bankCode,
+          accountName,
+          bankName,
           estateId,
         ],
       );
@@ -151,7 +171,7 @@ router.post(
   },
 );
 
-// --- ENDPOINT 2: ADMIN IDENTITY (Saves to 'estate_admin_users') ---
+// --- ENDPOINT 2: ADMIN IDENTITY ---
 router.post(
   "/save-admin-identity",
   isAuth,
@@ -166,13 +186,10 @@ router.post(
       const {
         adminFullName,
         ninNumber,
+        bvnNumber,
         adminRole,
         residentialAddress,
         authorizingBodyName,
-        accountNumber, // Added
-        bankCode, // Added
-        accountName, // Added
-        bankName, // Added
       } = req.body;
 
       const files = req.files;
@@ -189,7 +206,7 @@ router.post(
         ? await uploadToCloudinary(files.adminUtility[0].buffer)
         : null;
 
-      // 1. Update Estate Table
+      // 1. Update Estate Table with authorization info
       await db.query(
         `UPDATE estates SET 
           authorization_letter_url = $1, 
@@ -198,36 +215,30 @@ router.post(
         [authUrl, authorizingBodyName, estateId],
       );
 
-      // 2. Update Admin Table with Bank Details
+      // 2. Update Admin Table (Personal Identity Only)
       await db.query(
         `UPDATE estate_admin_users SET 
-          full_name = $1, 
-          nin = $2, 
-          role = $3, 
-          address = $4, 
-          utility_url = $5, 
-          signature_url = $6, 
-          profile_image_url = $7, 
-          bank_account_number = $8, -- Added
-          bank_code = $9,           -- Added
-          bank_account_name = $10,  -- Added
-          bank_name = $11,          -- Added
+          name = $1, 
+          nin_number = $2, 
+          bvn_number = $3,
+          role = $4, 
+          address = $5, 
+          admin_utility_url = $6, 
+          signature_url = $7, 
+          avatar = $8, 
           verification_step = 3,
           verification_status = 'pending' 
-          WHERE id = $12`,
+          WHERE id = $9`,
         [
           adminFullName,
           ninNumber,
+          bvnNumber,
           adminRole,
           residentialAddress,
           utilUrl,
           sigUrl,
           selfieUrl,
-          accountNumber, 
-          bankCode,           
-          accountName, 
-          bankName, 
-          adminId, 
+          adminId,
         ],
       );
 
@@ -251,7 +262,7 @@ router.post("/finalize-kyc", isAuth, async (req, res) => {
     );
     const livenessSnapsUrls = await Promise.all(snapUploadPromises);
 
-     await db.query(
+    await db.query(
       `UPDATE estate_admin_users SET 
        liveness_snaps = $1, 
        verification_step = 4, 
@@ -265,7 +276,6 @@ router.post("/finalize-kyc", isAuth, async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
-
 
 router.get("/status", async (req, res) => {
   try {
@@ -336,10 +346,10 @@ router.post("/reset", isAuth, async (req, res) => {
     await db.query("ROLLBACK");
     res.status(500).json({ success: false, message: error.message });
   }
-})
+});
 
 // Add this to your backend routes
-router.get('/resolve-bank', async (req, res) => {
+router.get("/resolve-bank", async (req, res) => {
   const { accountNumber, bankCode } = req.query;
 
   try {
@@ -349,15 +359,20 @@ router.get('/resolve-bank', async (req, res) => {
         headers: {
           Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
         },
-      }
+      },
     );
 
     res.json(response.data);
   } catch (error) {
-    console.error("Bank Resolution Error:", error.response?.data || error.message);
-    res.status(400).json({ status: false, message: "Could not resolve account" });
+    console.error(
+      "Bank Resolution Error:",
+      error.response?.data || error.message,
+    );
+    res
+      .status(400)
+      .json({ status: false, message: "Could not resolve account" });
   }
-});;
+});
 
 // --- ADMIN DASHBOARD ENDPOINT: APPROVE KYC ---
 router.post("/admin/approve-kyc", isAuth, async (req, res) => {

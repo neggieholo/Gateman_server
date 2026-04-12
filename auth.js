@@ -3,6 +3,7 @@ import passport from "passport";
 import firebaseAdmin from "./firebase.js";
 import bcrypt from "bcrypt";
 import pool from "./db.js";
+import { isSuperAdmin } from "./middlewares.js";
 
 import { sendRegistrationOTP } from "./emailService.js";
 import crypto from "crypto";
@@ -214,6 +215,97 @@ router.post("/login/security", (req, res, next) => {
           success: true,
           isTemp: user.isTemp || false,
           user, // Contains id, name, email, role, and estate_name (if not temp)
+          sessionId: req.sessionID
+        });
+      });
+    });
+  })(req, res, next);
+});
+
+// ------------------ Super Admin Registration ------------------
+// Note: In production, wrap this in isAuth and a permission check
+router.post("/register/super-admin", isSuperAdmin, async (req, res) => {
+  const { fullName, email, password, permissions } = req.body;
+
+  // Basic validation to prevent empty strings in the DB
+  if (!fullName || !email || !password) {
+    return res
+      .status(400)
+      .json({ error: "All fields (Name, Email, Password) are required." });
+  }
+
+  try {
+    // 1. Check for existing admin (Case-insensitive)
+    const normalizedEmail = email.toLowerCase().trim();
+    const existing = await pool.query(
+      "SELECT id FROM super_admins WHERE email = $1",
+      [normalizedEmail],
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: "Admin email already exists." });
+    }
+
+    // 2. Securely hash the password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // 3. Set Default permissions
+    // If 'all_access' is passed as true, we can ignore the rest.
+    const adminPermissions = permissions || {
+      all_access: false,
+      manage_estates: true,
+      manage_finances: false,
+      view_audit_logs: true,
+    };
+
+    // 4. Insert and return the safe user object
+    const result = await pool.query(
+      `INSERT INTO super_admins (full_name, email, password_hash, permissions, role) 
+       VALUES ($1, $2, $3, $4, $5) 
+       RETURNING id, full_name, email, permissions, role`,
+      [
+        fullName.trim(),
+        normalizedEmail,
+        hashedPassword,
+        JSON.stringify(adminPermissions),
+        "SUPER_ADMIN",
+      ],
+    );
+
+    // 5. Success response (excluding the hash for security)
+    res.status(201).json({
+      success: true,
+      message: "Super Admin created successfully",
+      admin: result.rows[0],
+    });
+  } catch (err) {
+    console.error("Super Admin Reg Error:", err);
+    res
+      .status(500)
+      .json({ error: "Internal server error during registration." });
+  }
+});
+
+// ------------------ Super Admin Login ------------------
+router.post("/login/super-admin", (req, res, next) => {
+  console.log("Super admin auth api hit!")
+  passport.authenticate("super-admin-local", (err, user, info) => {
+    if (err) return next(err);
+    if (!user) return res.status(401).json({ error: info?.message || "Unauthorized" });
+
+    req.login(user, (loginErr) => {
+      if (loginErr) return next(loginErr);
+
+      req.session.save((saveErr) => {
+        if (saveErr) return next(saveErr);
+        
+        // Remove sensitive hash before sending to frontend
+        const { password_hash, ...safeUser } = user;
+        safeUser.role = "SUPER_ADMIN"; 
+
+        res.json({
+          success: true,
+          user: safeUser,
           sessionId: req.sessionID
         });
       });

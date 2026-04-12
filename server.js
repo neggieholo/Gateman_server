@@ -19,6 +19,7 @@ import invitationsRoute from './invitations.js';
 import securityRoute from './securityManagement.js'
 import NotificationsRoute from './Notifications.js'
 import KYCRoute from './AdminKYC.js'
+import SuperAdminRoute from './super_admin.js'
 import crypto from "crypto";
 import { sendPasswordResetCode } from "./emailService.js";
 import { checkOverstays } from './invitations.js';
@@ -31,6 +32,7 @@ dotenv.config();
 const allowedOrigins = [
   "https:/gatemanhq.com", 
   "http://localhost:3005", 
+  "http://localhost:3000", 
   "http://localhost:8081" 
 ];
 
@@ -95,6 +97,7 @@ app.use("/api/invitations", invitationsRoute);
 app.use("/api/security", securityRoute);
 app.use("/api/notifications", NotificationsRoute);
 app.use("/api/kyc", KYCRoute);
+app.use("/api/master", SuperAdminRoute);
 
 app.get("/api/session-check", (req, res) => {
     if (req.isAuthenticated && req.isAuthenticated()) {

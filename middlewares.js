@@ -87,3 +87,41 @@ export const broadcastDirectNotification = async (req, res) => {
     client.release();
   }
 };
+
+// middleware/auth.js
+
+// 1. Basic Check: Is the user a logged-in Super Admin?
+export const isSuperAdmin = (req, res, next) => {
+  if (req.isAuthenticated() && req.user.role === 'SUPER_ADMIN') {
+    return next();
+  }
+  return res.status(403).json({ 
+    error: "Access Denied: Super Admin privileges required." 
+  });
+};
+
+// 2. Granular Check: Does the Super Admin have a specific permission?
+export const hasPermission = (permissionKey) => {
+  return (req, res, next) => {
+    // First ensure they are a Super Admin
+    if (!req.isAuthenticated() || req.user.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({ error: "Access Denied." });
+    }
+
+    const { permissions } = req.user;
+
+    // If they have 'all_access', let them through regardless of the key
+    if (permissions?.all_access === true) {
+      return next();
+    }
+
+    // Check for the specific permission key (e.g., 'manage_finances')
+    if (permissions && permissions[permissionKey] === true) {
+      return next();
+    }
+
+    return res.status(403).json({ 
+      error: `Access Denied: You do not have the '${permissionKey.replace('_', ' ')}' permission.` 
+    });
+  };
+};

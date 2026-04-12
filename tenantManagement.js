@@ -560,14 +560,13 @@ router.get("/estates", async (req, res) => {
     // Joining estates with estate_admin_users to get city and town
     const query = `
       SELECT 
-        e.id, 
-        e.name, 
-        e.estate_code, 
-        e.created_at,
-        u.city,
-        u.town
-      FROM estates e
-      LEFT JOIN estate_admin_users u ON e.id = u.estate_id
+        id, 
+        name, 
+        estate_code, 
+        created_at,
+        city,
+        town
+      FROM estates 
       ORDER BY e.name ASC
     `;
 

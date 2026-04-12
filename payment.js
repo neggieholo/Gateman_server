@@ -140,8 +140,13 @@ router.post("/paystack-webhook", async (req, res) => {
     // Create Estate
     const estateCode = crypto.randomBytes(3).toString("hex").toUpperCase();
     const estateResult = await client.query(
-      "INSERT INTO estates (name, estate_code) VALUES ($1, $2) RETURNING id",
-      [`${tempUser.name}'s Estate`, estateCode],
+      "INSERT INTO estates (name, estate_code, city, town, ) VALUES ($1, $2) RETURNING id",
+      [
+        `${tempUser.name} Estate`,
+        estateCode,
+        tempUser.city,
+        tempUser.town,
+      ],
     );
     const estateId = estateResult.rows[0].id;
 
@@ -152,15 +157,12 @@ router.post("/paystack-webhook", async (req, res) => {
     // Insert into estate_admin_users with city/town
     await client.query(
       `INSERT INTO estate_admin_users 
-       (estate_id, name, email, password, city, town, subscription_expiry, role) 
+       (estate_id, email, password, subscription_expiry, role) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         estateId,
-        tempUser.name,
         tempUser.email,
         tempUser.password,
-        tempUser.city || null,
-        tempUser.town || null,
         subscriptionExpiry,
         "ADMIN",
       ],
