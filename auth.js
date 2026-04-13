@@ -313,5 +313,90 @@ router.post("/login/super-admin", (req, res, next) => {
   })(req, res, next);
 });
 
+// ------------------ Register Vendor ------------------
+router.post("/register/vendor", async (req, res, next) => {
+  const { email, password, full_name, business_name, service_category, otp, metadata } = req.body;
+
+  try {
+    const [hash, expires] = metadata.split(".");
+    
+    if (Date.now() > parseInt(expires)) {
+      return res.status(400).json({ error: "OTP expired. Please resend." });
+    }
+
+    const data = `${email}.${otp}.${expires}`;
+    const verifyHash = crypto.createHmac("sha256", OTP_SECRET).update(data).digest("hex");
+
+    if (!crypto.timingSafeEqual(Buffer.from(verifyHash, 'hex'), Buffer.from(hash, 'hex'))) {
+      return res.status(400).json({ error: "Invalid OTP code." });
+    }
+
+    // 2. Security Check: Ensure email isn't already taken in vendors table
+    const normalizedEmail = email.toLowerCase().trim();
+    const existingVendor = await pool.query(
+      "SELECT email FROM vendors WHERE email = $1",
+      [normalizedEmail]
+    );
+
+    if (existingVendor.rows.length > 0) {
+       return res.status(400).json({ error: "This email is already registered as a vendor." });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      `INSERT INTO vendors (email, password_hash, full_name, business_name, service_category, role, identity_verified) 
+       VALUES ($1, $2, $3, $4, $5, 'VENDOR', false) 
+       RETURNING id, email, full_name, role`,
+      [
+        normalizedEmail,
+        passwordHash,
+        full_name,
+        business_name || null,
+        service_category,
+      ],
+    );
+
+    const user = result.rows[0];
+
+    req.login(user, (err) => {
+      if (err) return next(err);
+      res.json({
+        success: true,
+        message: "Vendor registered successfully.",
+        user,
+      });
+    });
+
+  } catch (err) {
+    console.error("Vendor Registration Error:", err);
+    res.status(500).json({ error: "Registration failed." });
+  }
+});
+
+// ------------------ Login Vendor ------------------
+router.post("/login/vendor", (req, res, next) => {
+  console.log("Vendor login attempt:", req.body.email);
+  
+  passport.authenticate("vendor-local", (err, user, info) => {
+    if (err || !user) {
+      return res.status(401).json({ error: info?.message || "Login failed" });
+    }
+
+    req.login(user, (loginErr) => {
+      if (loginErr) return next(loginErr);
+
+      req.session.save((saveErr) => {
+        if (saveErr) return next(saveErr);
+
+        return res.json({
+          success: true,
+          user, // Contains id, full_name, email, role, etc.
+          sessionId: req.sessionID
+        });
+      });
+    });
+  })(req, res, next);
+});
+
 export default router;
 

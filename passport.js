@@ -172,7 +172,7 @@ const configurePassport = (passport) => {
       {
         usernameField: "email",
         passwordField: "password",
-        passReqToCallback: true, 
+        passReqToCallback: true,
       },
       async (req, email, password, done) => {
         try {
@@ -221,6 +221,37 @@ const configurePassport = (passport) => {
     ),
   );
 
+  // VENDOR LOGIN STRATEGY
+  passport.use(
+    "vendor-local",
+    new LocalStrategy(
+      { usernameField: "email" },
+      async (email, password, done) => {
+        try {
+          const result = await pool.query(
+            "SELECT * FROM vendors WHERE email = $1",
+            [email.trim().toLowerCase()], // Added toLowerCase for safety
+          );
+
+          const vendor = result.rows[0];
+
+          if (!vendor) {
+            return done(null, false, { message: "Vendor account not found." });
+          }
+
+          // Verify Password against password_hash
+          const match = await bcrypt.compare(password, vendor.password_hash);
+          if (!match) {
+            return done(null, false, { message: "Incorrect password." });
+          }
+          return done(null, vendor);
+        } catch (err) {
+          return done(err);
+        }
+      },
+    ),
+  );
+
   // SESSION SERIALIZE
   passport.serializeUser((user, done) => {
     done(null, {
@@ -251,6 +282,10 @@ const configurePassport = (passport) => {
         const query = "SELECT * FROM super_admins WHERE id = $1";
 
         result = await pool.query(query, [user.id]);
+      } else if (user.type === "VENDOR") {
+        const query = "SELECT * FROM vendors WHERE id = $1";
+
+        result = await pool.query(query, [user.id]);
       } else {
         // ADMIN
         result = await pool.query(
@@ -269,6 +304,6 @@ const configurePassport = (passport) => {
       done(err);
     }
   });
-};
+};;;
 
 export default configurePassport;
