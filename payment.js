@@ -8,7 +8,7 @@ const router = express.Router();
 
 router.post("/", async (req, res) => {
   try {
-    const { name, email, password, city, town, otp, metadata } = req.body;
+    const { name, email, password, state, lga, otp, metadata } = req.body;
     const OTP_SECRET = process.env.OTP_SECRET;
 
     if (!name || !email || !password) {
@@ -50,9 +50,9 @@ router.post("/", async (req, res) => {
     }
 
     const estateCheck = await pool.query(
-      `SELECT id FROM estate_admin_users
-             WHERE LOWER(name) = LOWER($1) AND LOWER(city) = LOWER($2) AND LOWER(town) = LOWER($3)`,
-      [name, city, town],
+      `SELECT id FROM estates
+             WHERE LOWER(name) = LOWER($1) AND LOWER(state) = LOWER($2) AND LOWER(lga) = LOWER($3)`,
+      [name, state, lga],
     );
 
     if (estateCheck.rows.length > 0) {
@@ -70,8 +70,8 @@ router.post("/", async (req, res) => {
       amount,
       reference,
       callback_url:
-        "https://4f8a-102-88-54-30.ngrok-free.app/api/payment/callback",
-      metadata: { name, city, town },
+        "https://0a2e-102-88-55-201.ngrok-free.app/api/payment/callback",
+      metadata: { name, state, lga },
     };
 
     const response = await axios.post(
@@ -88,9 +88,9 @@ router.post("/", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     await pool.query(
-      `INSERT INTO temp_payment_info (tx_ref, name, email, password, city, town) 
+      `INSERT INTO temp_payment_info (tx_ref, name, email, password, state, lga) 
              VALUES ($1, $2, $3, $4, $5, $6)`,
-      [reference, name, email, hashedPassword, city || null, town || null],
+      [reference, name, email, hashedPassword, state, lga],
     );
 
     res.json({ paymentLink: response.data.data.authorization_url });
@@ -140,12 +140,12 @@ router.post("/paystack-webhook", async (req, res) => {
     // Create Estate
     const estateCode = crypto.randomBytes(3).toString("hex").toUpperCase();
     const estateResult = await client.query(
-      "INSERT INTO estates (name, estate_code, city, town, ) VALUES ($1, $2) RETURNING id",
+      "INSERT INTO estates (name, estate_code, state,lga ) VALUES ($1, $2, $3, $4) RETURNING id",
       [
         `${tempUser.name} Estate`,
         estateCode,
-        tempUser.city,
-        tempUser.town,
+        tempUser.state,
+        tempUser.lga
       ],
     );
     const estateId = estateResult.rows[0].id;
@@ -158,13 +158,13 @@ router.post("/paystack-webhook", async (req, res) => {
     await client.query(
       `INSERT INTO estate_admin_users 
        (estate_id, email, password, subscription_expiry, role) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+       VALUES ($1, $2, $3, $4, $5)`,
       [
         estateId,
         tempUser.email,
         tempUser.password,
         subscriptionExpiry,
-        "ADMIN",
+        "ADMIN"
       ],
     );
 

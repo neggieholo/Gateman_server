@@ -301,7 +301,7 @@ router.patch("/edit/:id", isAuth, async (req, res) => {
   }
 });
 
-const sendPushNotification = async (token, title, body, data = {}) => {
+export const sendPushNotification = async (token, title, body, data = {}) => {
   try {
     const message = {
       to: token,

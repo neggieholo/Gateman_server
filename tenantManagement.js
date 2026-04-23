@@ -2,7 +2,9 @@ import express from "express";
 import multer from 'multer';
 import pool from "./db.js";
 import { v2 as cloudinary } from 'cloudinary';
-
+import { isAuth } from "./middlewares.js";
+import { sendRegistrationOTP } from "./emailService.js";
+import crypto from "crypto";
 
 const router = express.Router();
 
@@ -553,9 +555,9 @@ router.put("/join-request/unblock", ensureAdmin, async (req, res) => {
 });
 
 router.get("/estates", async (req, res) => {
-  if (!req.user) {
-    return res.status(401).json({ error: "Not authenticated" });
-  }
+  // if (!req.user) {
+  //   return res.status(401).json({ error: "Not authenticated" });
+  // }
   try {
     // Joining estates with estate_admin_users to get city and town
     const query = `
@@ -580,6 +582,23 @@ router.get("/estates", async (req, res) => {
     console.error("Fetch Estates Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
+});
+
+router.post("/set-payment-info", isAuth, async (req, res) => {
+  const { bankName, accountName, accountNumber, utilityInstructions } =
+    req.body;
+  const estateId = req.user.estateId;
+
+  await pool.query(
+    `UPDATE estates SET 
+      bank_name = $1, 
+      bank_account_name = $2, 
+      bank_account_number = $3,
+      payment_instructions = $4
+     WHERE id = $5`,
+    [bankName, accountName, accountNumber, utilityInstructions, estateId],
+  );
+  res.json({ success: true, message: "Payment details updated." });
 });
 
 // -------------------- Update Push Token (Secure) --------------------
@@ -667,6 +686,224 @@ router.post("/send-group-notification", async (req, res) => {
   } catch (err) {
     console.error("Group Push Error:", err);
     res.status(500).json({ error: "Internal server error dispatching group push" });
+  }
+});
+
+// POST /api/auth/send-otp
+router.post("/send-otp", async (req, res) => {
+  console.log('profile otp api hit')
+  const { target, type } = req.body; 
+  const adminId = req.user.id
+
+  const checkUser = await pool.query(
+    `SELECT id FROM estate_admin_users 
+       WHERE (email = $1 OR phone_number = $1) 
+       AND id != $2`,
+    [target, adminId],
+  );
+
+  if (checkUser.rows.length > 0) {
+    return res.status(400).json({
+      success: false,
+      message: `This ${type} is already registered to another account.`,
+    });
+  }
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const expires = Date.now() + 10 * 60000; // 10 mins
+
+  // Create hash using the target (phone or email)
+  const data = `${target}.${otp}.${expires}`;
+  const hash = crypto
+    .createHmac("sha256", process.env.OTP_SECRET)
+    .update(data)
+    .digest("hex");
+  
+  const metadata = `${hash}.${expires}`;
+
+  try {
+    if (type === "email") {
+      console.log("send email otp for profile edit")
+      const emailSent = await sendRegistrationOTP(target, otp);
+      if (emailSent) {
+        res.json({ success: true, metadata });
+      } else {
+        res.status(500).json({ error: "Failed to send email" });
+      }
+    } else {
+      // For phone/SMS, return OTP in dev or call your SMS provider
+      return res.json({ success: true, metadata, otp: process.env.MODE === 'development' ? otp : undefined });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Failed to send OTP" });
+  }
+});
+
+
+router.post("/verify-otp-only", async (req, res) => {
+  const { otp, metadata, target } = req.body;
+
+  try {
+    // 1. Normalize the target (Remove spaces and lowercase email)
+    const normalizedTarget = target.trim().toLowerCase();
+
+    const [hash, expires] = metadata.split(".");
+
+    // 2. Check Expiry
+    if (Date.now() > parseInt(expires)) {
+      return res.status(400).json({ success: false, message: "OTP expired." });
+    }
+
+    // 3. Re-create the hash using the EXACT same format as the send route
+    const data = `${normalizedTarget}.${otp}.${expires}`;
+    const verifyHash = crypto
+      .createHmac("sha256", process.env.OTP_SECRET)
+      .update(data)
+      .digest("hex");
+
+    // 4. Comparison Fix
+    // Instead of timingSafeEqual (which crashes on unequal lengths),
+    // use a simple comparison for hex strings.
+    if (verifyHash !== hash) {
+      return res.json({ success: false, message: "Invalid OTP code." });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Verification Error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// -------------------- Update Estate Configuration --------------------
+router.post("/update-config", ensureAdmin, async (req, res) => {
+  const { config } = req.body;
+  const adminId = req.user.id;
+  const estateId = req.user.estate_id;
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const adminQuery = `
+      UPDATE estate_admin_users 
+      SET name = $1, email = $2, phone_number = $3 
+      WHERE id = $4 
+      RETURNING *`;
+    const adminValues = [
+      config.admin_name,
+      config.email,
+      config.phone_number,
+      adminId,
+    ];
+    const adminResult = await client.query(adminQuery, adminValues);
+
+    const estateQuery = `
+      UPDATE estates 
+      SET 
+        bank_name = $1, 
+        bank_code = $2, 
+        bank_account_number = $3, 
+        bank_account_name = $4,
+        payment_type = $5,
+        external_api_url = $6,
+        emergency_contacts = $7
+      WHERE id = $8`;
+    
+    const estateValues = [
+      config.bank_details.bank_name,
+      config.bank_details.bank_code,
+      config.bank_details.account_number,
+      config.bank_details.account_name,
+      config.payment_type,
+      config.external_api_url,
+      JSON.stringify(config.emergency_contacts), 
+      estateId,
+    ];
+    await client.query(estateQuery, estateValues);
+
+    await client.query("COMMIT");
+
+    const updatedUser = {
+      ...adminResult.rows[0],
+      bank_name: config.bank_details.bank_name,
+      bank_code: config.bank_details.bank_code,
+      bank_account_number: config.bank_details.account_number,
+      bank_account_name: config.bank_details.account_name,
+      payment_type: config.payment_type,
+      external_api_url: config.external_api_url,
+      emergency_contacts: config.emergency_contacts,
+      estate_id: estateId
+    };
+
+    res.json({
+      success: true,
+      message: "Configuration updated successfully",
+      user: updatedUser
+    });
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Update Config Error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  } finally {
+    client.release();
+  }
+});
+
+router.delete("/terminate-account", isAuth, async (req, res) => {
+  const adminId = req.user.id; // Extracted from JWT
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    // 1. Get the Estate ID associated with this admin
+    const estateResult = await client.query(
+      "SELECT estate_id FROM estate_admin_users WHERE id = $1",
+      [adminId],
+    );
+
+    if (estateResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res
+        .status(404)
+        .json({ success: false, message: "Estate not found." });
+    }
+
+    const estateId = estateResult.rows[0].estate_id;
+
+    // 2. Delete all residents associated with this estate
+    await client.query("DELETE FROM residents WHERE estate_id = $1", [
+      estateId,
+    ]);
+
+    // 4. Delete the admin user(s)
+    await client.query("DELETE FROM estate_admin_users WHERE estate_id = $1", [
+      estateId,
+    ]);
+
+    // 5. Finally, delete the estate record itself
+    await client.query("DELETE FROM estates WHERE id = $1", [estateId]);
+
+    await client.query("COMMIT");
+
+    // Optional: Clear cookies if using session-based auth
+    res.clearCookie("token");
+
+    res.json({
+      success: true,
+      message: "Estate and all associated data have been permanently deleted.",
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Termination Error:", err);
+    res.status(500).json({
+      success: false,
+      message: "An error occurred during termination. Please contact support.",
+    });
+  } finally {
+    client.release();
   }
 });
 

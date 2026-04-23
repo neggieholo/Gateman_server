@@ -80,7 +80,23 @@ const configurePassport = (passport) => {
       async (email, password, done) => {
         try {
           const result = await pool.query(
-            "SELECT * FROM estate_admin_users WHERE email = $1",
+            `SELECT 
+              u.*, 
+              e.estate_code, 
+              e.name as estate_name,
+              e.state, 
+              e.lga,
+              e.town,
+              e.bank_name,
+              e.bank_code,
+              e.bank_account_number,
+              e.bank_account_name,
+              e.emergency_contacts,
+              e.payment_type,
+              e.external_api_url
+            FROM estate_admin_users u
+            LEFT JOIN estates e ON u.estate_id = e.id
+            WHERE u.email = $1`,
             [email],
           );
 
@@ -91,6 +107,7 @@ const configurePassport = (passport) => {
           if (!match)
             return done(null, false, { message: "Incorrect password" });
 
+          // The 'user' object now contains 'estate_code'
           return done(null, user);
         } catch (err) {
           return done(err);
@@ -289,7 +306,23 @@ const configurePassport = (passport) => {
       } else {
         // ADMIN
         result = await pool.query(
-          "SELECT * FROM estate_admin_users WHERE id = $1",
+          `SELECT 
+          u.*, 
+          e.estate_code, 
+          e.name as estate_name,
+          e.state, 
+          e.lga,
+          e.town,
+          e.bank_name,
+          e.bank_code,
+          e.bank_account_number,
+          e.bank_account_name,
+          e.emergency_contacts,
+          e.payment_type,
+          e.external_api_url
+        FROM estate_admin_users u
+        LEFT JOIN estates e ON u.estate_id = e.id
+        WHERE u.id = $1`,
           [user.id],
         );
       }
@@ -304,6 +337,6 @@ const configurePassport = (passport) => {
       done(err);
     }
   });
-};;;
+};
 
 export default configurePassport;

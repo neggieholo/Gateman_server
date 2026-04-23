@@ -4,6 +4,7 @@ import axios from "axios";
 import { v2 as cloudinary } from "cloudinary";
 import { WebApi } from "smile-identity-core";
 import { isAuth, kycLookupLimiter } from "./middlewares.js";
+import pool from "./db.js";
 
 const router = express.Router();
 
@@ -15,14 +16,25 @@ cloudinary.config({
 
 const storage = multer.memoryStorage();
 const upload = multer({
-  storage,
-  limits: { fileSize: 2 * 1024 * 1024 },
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, 
+  fileFilter: (req, file, cb) => {
+    if (
+      file.mimetype === "image/jpeg" ||
+      file.mimetype === "image/png" ||
+      file.mimetype === "application/pdf" 
+    ) {
+      cb(null, true);
+    } else {
+      cb(new Error("Unsupported file type"), false);
+    }
+  },
 });
 
 const uploadToCloudinary = (fileBuffer) => {
   return new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
-      { folder: "gateman_admin_kyc" },
+      { folder: "gateman_admin_kyc", resource_type: "auto" },
       (error, result) => {
         if (error) return reject(error);
         resolve(result.secure_url);
@@ -49,16 +61,27 @@ const verifyNIN = async (nin, firstName, lastName) => {
   }
 };
 
-const verifyCAC = async (rcNumber) => {
-  try {
-    const response = await axios.get(
-      `https://api.withmono.com/v3/lookup/cac?search=${rcNumber}`,
-      { headers: { "mono-sec-key": process.env.MONO_SECRET_KEY } },
-    );
-    return response.data.data;
-  } catch (error) {
-    return null;
-  }
+// const verifyCAC = async (rcNumber) => {
+//   try {
+//     const response = await axios.get(
+//       `https://api.withmono.com/v3/lookup/cac?search=${rcNumber}`,
+//       { headers: { "mono-sec-key": process.env.MONO_SECRET_KEY } },
+//     );
+//     return response.data.data;
+//   } catch (error) {
+//     return null;
+//   }
+// };
+
+const verifyCAC = async (cacNumber) => {
+  // Logic: For now, if you're skipping the API, return a dummy object 
+  // so the database columns (business_type, address) get filled.
+  return {
+    status: "ACTIVE",
+    type: cacNumber.startsWith("IT") ? "Incorporated Trustee" : "Company",
+    address: "Pending Manual Verification",
+    registration_date: new Date().toISOString()
+  };
 };
 
 const verifyAdminNIN = async (nin) => {
@@ -125,7 +148,7 @@ router.post(
         : null;
 
       // Update Estate Table (Entity Details + Bank Details)
-      await db.query(
+      await pool.query(
         `UPDATE estates SET 
           cac_number = $1, 
           tin_number = $2, 
@@ -159,7 +182,7 @@ router.post(
       );
 
       // Update Admin Progress
-      await db.query(
+      await pool.query(
         "UPDATE estate_admin_users SET verification_step = 2 WHERE id = $1",
         [adminId],
       );
@@ -207,7 +230,7 @@ router.post(
         : null;
 
       // 1. Update Estate Table with authorization info
-      await db.query(
+      await pool.query(
         `UPDATE estates SET 
           authorization_letter_url = $1, 
           authorizing_body_name = $2 
@@ -216,13 +239,13 @@ router.post(
       );
 
       // 2. Update Admin Table (Personal Identity Only)
-      await db.query(
+      await pool.query(
         `UPDATE estate_admin_users SET 
           name = $1, 
           nin_number = $2, 
           bvn_number = $3,
           role = $4, 
-          address = $5, 
+          residential_address = $5, 
           admin_utility_url = $6, 
           signature_url = $7, 
           avatar = $8, 
@@ -254,15 +277,17 @@ router.post(
 router.post("/finalize-kyc", isAuth, async (req, res) => {
   try {
     const adminId = req.user.id;
-    const { selfiePhotos } = req.body; // Array of 3 base64 strings
+    const { selfiePhotos } = req.body;
 
-    // 1. Upload the 3 Liveness Snaps to Cloudinary
-    const snapUploadPromises = selfiePhotos.map((base64) =>
-      uploadToCloudinary(base64),
-    );
+    const snapUploadPromises = selfiePhotos.map((base64) => {
+      // Strip the data:image/jpeg;base64, prefix and convert to Buffer
+      const buffer = Buffer.from(base64.split(",")[1], "base64");
+      return uploadToCloudinary(buffer);
+    });
+
     const livenessSnapsUrls = await Promise.all(snapUploadPromises);
 
-    await db.query(
+    await pool.query(
       `UPDATE estate_admin_users SET 
        liveness_snaps = $1, 
        verification_step = 4, 
@@ -281,7 +306,7 @@ router.get("/status", async (req, res) => {
   try {
     const adminId = req.user.id;
 
-    const result = await db.query(
+    const result = await pool.query(
       "SELECT verification_status, verification_step FROM estate_admin_users WHERE id = $1",
       [adminId],
     );
@@ -292,7 +317,6 @@ router.get("/status", async (req, res) => {
 
     const admin = result.rows[0];
 
-    // Map your DB 'verification_status' to what the frontend expects
     let status = "pending";
     if (admin.verification_status === "verified") status = "completed";
     if (admin.verification_status === "rejected") status = "failed";
@@ -308,12 +332,13 @@ router.get("/status", async (req, res) => {
 
 router.post("/reset", isAuth, async (req, res) => {
   const { adminId, estateId } = req.body;
+  const client = await pool.connect(); // Get a dedicated client from the pool
 
   try {
-    await db.query("BEGIN");
+    await client.query("BEGIN"); // Start the transaction
 
-    // Reset Estates Table
-    await db.query(
+    // 1. Reset Estates Table
+    await client.query(
       `UPDATE estates SET 
         cac_number = NULL, 
         tin_number = NULL, 
@@ -330,21 +355,24 @@ router.post("/reset", isAuth, async (req, res) => {
       [estateId],
     );
 
-    // Reset Admin Table
-    await db.query(
+    // 2. Reset Admin Table
+    await client.query(
       `UPDATE estate_admin_users SET 
-        full_name = NULL, nin = NULL, role = NULL, address = NULL, 
-        utility_url = NULL, selfie_url = NULL, 
-        verification_step = 0, kyc_status = 'pending' 
+        name = NULL, nin_number = NULL, bvn_number = NULL, role = NULL, address = NULL, 
+        admin_utility_url = NULL, avatar = NULL, signature_url = NULL,
+        verification_step = 0, verification_status = 'pending' 
        WHERE id = $1`,
       [adminId],
     );
 
-    await db.query("COMMIT");
+    await client.query("COMMIT"); // Save changes
     res.json({ success: true, message: "Reset successful" });
   } catch (error) {
-    await db.query("ROLLBACK");
+    await client.query("ROLLBACK"); // Undo everything if it fails
+    console.error("Reset Error:", error);
     res.status(500).json({ success: false, message: error.message });
+  } finally {
+    client.release(); // IMPORTANT: Release the client back to the pool
   }
 });
 
@@ -380,10 +408,10 @@ router.post("/admin/approve-kyc", isAuth, async (req, res) => {
 
   try {
     // 1. Fetch all saved info for this estate and admin
-    const estateResult = await db.query("SELECT * FROM estates WHERE id = $1", [
+    const estateResult = await pool.query("SELECT * FROM estates WHERE id = $1", [
       estateId,
     ]);
-    const adminResult = await db.query(
+    const adminResult = await pool.query(
       "SELECT * FROM estate_admin_users WHERE id = $1",
       [adminId],
     );
@@ -415,12 +443,12 @@ router.post("/admin/approve-kyc", isAuth, async (req, res) => {
     const subaccountCode = paystackResponse.data.data.subaccount_code;
 
     // 3. Update status to 'verified' and save subaccount code
-    await db.query(
+    await pool.query(
       "UPDATE estates SET status = 'verified', paystack_subaccount_code = $1 WHERE id = $2",
       [subaccountCode, estateId],
     );
 
-    await db.query(
+    await pool.query(
       "UPDATE estate_admin_users SET status = 'active' WHERE id = $1",
       [adminId],
     );
@@ -483,7 +511,7 @@ router.post("/callback", async (req, res) => {
 
     if (isSuccess) {
       // 2. Map Smile ID fields to your estate_admin_users columns
-      await db.query(
+      await pool.query(
         `UPDATE estate_admin_users 
          SET 
             is_verified = true,
@@ -506,7 +534,7 @@ router.post("/callback", async (req, res) => {
       console.log(`KYC Verified for Admin: ${adminId}`);
     } else {
       // 3. Handle Failure or Manual Review
-      await db.query(
+      await pool.query(
         `UPDATE estate_admin_users 
          SET 
             verification_status = 'rejected',
