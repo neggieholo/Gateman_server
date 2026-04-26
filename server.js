@@ -35,6 +35,7 @@ const allowedOrigins = [
   "http://localhost:3010",
   "http://localhost:3000",
   "http://localhost:8081",
+  "http://192.168.100.17:3005",
 ];
 
 const app = express();
@@ -445,11 +446,12 @@ io.use((socket, next) => {
 //   next();
 // });
 
+
 const userStatus = new Map();
 
 io.on("connection", (socket) => {
   const user = socket.request.user;
-  const estateId = user?.estate_id; // Ensure your passport user object has estate_id
+  const estateId = user?.estate_id; 
 
   if (user && user.id && estateId) {
     console.log(`✅ Socket connected: User ${user.id}`);
@@ -459,6 +461,7 @@ io.on("connection", (socket) => {
     socket.join(estateRoom);
     socket.join(`user_${user.id}`);
 
+   
     // 2. Update Map
     userStatus.set(user.id, "online");
 
@@ -486,6 +489,19 @@ io.on("connection", (socket) => {
       socket
         .to(`user_${targetId}`)
         .emit("is_typing", { from: user.id, typing: false });
+    });
+
+    socket.on("initiate_call", (data) => {
+      const { targetId, channelName, senderName, senderId } = data;
+
+      console.log(`📞 Call Request: ${senderName} -> ${targetId}`);
+
+      // Send the "incoming_call" event ONLY to the specific user room
+      socket.to(`user_${targetId}`).emit("incoming_call", {
+        channelName,
+        senderName,
+        senderId,
+      });
     });
 
     socket.on("disconnect", () => {

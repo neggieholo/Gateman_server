@@ -329,8 +329,9 @@ router.delete("/comments/:id", isAuth, async (req, res) => {
 });
 
 router.post("/send-direct-notification", isAuth, async (req, res) => {
-   const { title, message, targets } = req.body;
+   const { title, message, targets, type } = req.body;
    const estate_id = req.user.estate_id;
+   const validType = type || "update";
    const client = await pool.connect();
 
    try {
@@ -347,8 +348,8 @@ router.post("/send-direct-notification", isAuth, async (req, res) => {
          // Save to DB
          const resDb = await client.query(
            `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
-          VALUES ($1, $2, 'tenant', $3, $4, 'general') RETURNING *`,
-           [estate_id, resident.id, title, message],
+          VALUES ($1, $2, 'tenant', $3, $4, $5) RETURNING *`,
+           [estate_id, resident.id, title, message, validType],
          );
 
          const residentNotif = resDb.rows[0];
@@ -358,7 +359,8 @@ router.post("/send-direct-notification", isAuth, async (req, res) => {
          // Push Notification
          if (resident.push_token) {
            sendPushNotification(resident.push_token, title, message, {
-             type: "general",
+             type: "notification",
+             subtype: validType,
            });
            results.residentsSent++;
          }
@@ -375,8 +377,8 @@ router.post("/send-direct-notification", isAuth, async (req, res) => {
        for (const guard of guards) {
          const resDb = await client.query(
            `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
-          VALUES ($1, $2, 'security', $3, $4, 'general') RETURNING *`,
-           [estate_id, guard.id, title, message],
+          VALUES ($1, $2, 'security', $3, $4, $5) RETURNING *`,
+           [estate_id, guard.id, title, message, validType],
          );
 
          const guardNotif = resDb.rows[0];
@@ -385,7 +387,8 @@ router.post("/send-direct-notification", isAuth, async (req, res) => {
 
          if (guard.push_token) {
            sendPushNotification(guard.push_token, title, message, {
-             type: "broadcast",
+             type: "notification",
+             subtype: validType,
            });
            results.securitySent++;
          }

@@ -34,7 +34,7 @@ router.post("/otp/send", async (req, res) => {
 
 // ------------------ Register Tenant ------------------
 router.post("/register/tenant", async (req, res, next) => {
-  const { email, password, name, phone, otp, metadata } = req.body;
+  const { email, password, name, otp, metadata } = req.body;
 
   try {
     // 1. Verify the Metadata "Proof"
@@ -52,21 +52,21 @@ router.post("/register/tenant", async (req, res, next) => {
   }
     // 2. Security Check: Ensure email isn't already taken
     const existingUser = await pool.query(
-      `SELECT email FROM tenant_users WHERE email = $1 OR phone = $2
+      `SELECT email FROM tenant_users WHERE email = $1
        UNION SELECT email FROM temp_tenant_users WHERE email = $1`,
-      [email.trim(), phone.trim()]
+      [email.trim()]
     );
 
     if (existingUser.rows.length > 0) {
-       return res.status(400).json({ error: "Email or Phone number already registered." });
+       return res.status(400).json({ error: "Email already registered." });
     }
 
     // 3. Hash Password and Insert
     const passwordHash = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      `INSERT INTO temp_tenant_users (email, password, name, phone, role) 
-       VALUES ($1, $2, $3, $4, 'TENANT') RETURNING id, email, name`,
-      [email, passwordHash, name, phone]
+      `INSERT INTO temp_tenant_users (email, password, name, role) 
+       VALUES ($1, $2, $3, 'TENANT') RETURNING id, email, name`,
+      [email, passwordHash, name]
     );
 
     const user = result.rows[0];

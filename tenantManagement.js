@@ -1,7 +1,7 @@
 import express from "express";
-import multer from 'multer';
+import multer from "multer";
 import pool from "./db.js";
-import { v2 as cloudinary } from 'cloudinary';
+import { v2 as cloudinary } from "cloudinary";
 import { isAuth } from "./middlewares.js";
 import { sendRegistrationOTP } from "./emailService.js";
 import crypto from "crypto";
@@ -52,7 +52,6 @@ export const ensureTempTenant = (req, res, next) => {
   res.status(401).json({ error: "Unauthorized" });
 };
 
-
 // -------------------- Fetch All Join Requests --------------------
 router.get("/join-requests", ensureAdmin, async (req, res) => {
   const adminId = req.user.id; // Get the ID of the logged-in admin
@@ -85,7 +84,9 @@ router.get("/tenants", async (req, res) => {
     const currentUserId = req.user?.id;
 
     if (!estateId) {
-      return res.status(401).json({ error: "Unauthorized: No estate assigned." });
+      return res
+        .status(401)
+        .json({ error: "Unauthorized: No estate assigned." });
     }
     let query;
     let params;
@@ -125,7 +126,7 @@ router.delete("/tenant/:id", ensureAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       `DELETE FROM tenant_users WHERE id = $1 RETURNING *`,
-      [id]
+      [id],
     );
 
     if (result.rows.length === 0) {
@@ -143,85 +144,98 @@ router.delete("/tenant/:id", ensureAdmin, async (req, res) => {
 });
 
 // -------------------- Create Join Request --------------------
-router.post("/join-request", upload.fields([
-  { name: 'selfie', maxCount: 1 },
-  { name: 'idFront', maxCount: 1 },
-  { name: 'idBack', maxCount: 1 },
-  { name: 'utilityBill', maxCount: 1 }
-]), async (req, res) => {
-  const { tempTenantId, estateId, block, unit, idType } = req.body;
-  
-  if (!tempTenantId || !estateId) {
-    return res.status(400).json({ error: "Id and Estate registration are required" });
-  }
+router.post(
+  "/join-request",
+  upload.fields([
+    { name: "selfie", maxCount: 1 },
+    { name: "idFront", maxCount: 1 },
+    { name: "idBack", maxCount: 1 },
+    { name: "utilityBill", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    const { tempTenantId, estateId, block, unit, idType } = req.body;
 
-  try {
-
-    const existingReq = await pool.query(
-      `SELECT id FROM join_requests WHERE temp_tenant_id = $1`,
-      [tempTenantId]
-    );
-
-    if (existingReq.rows.length > 0) {
-      return res.status(409).json({ success: false, error: "Only one join request is allowed pending approval." });
+    if (!tempTenantId || !estateId) {
+      return res
+        .status(400)
+        .json({ error: "Id and Estate registration are required" });
     }
 
-    const blockCheck = await pool.query(
-    `SELECT id FROM estate_admin_users 
-     WHERE estate_id = $1 AND $2 = ANY(blocked_tenant_ids)`,
-    [estateId, tempTenantId]
-    );
+    try {
+      const existingReq = await pool.query(
+        `SELECT id FROM join_requests WHERE temp_tenant_id = $1`,
+        [tempTenantId],
+      );
 
-    if (blockCheck.rows.length > 0) {
-      return res.status(403).json({ 
-        success: false, 
-        error: "Your account has been restricted by this estate's administration." 
-      });
-    }
-
-    await pool.query(
-      "UPDATE temp_tenant_users SET rejection_message = NULL, is_read = FALSE WHERE id = $1",
-      [tempTenantId]
-    );
-
-    const uploadTasks = {};
-    const fieldNames = ['selfie', 'idFront', 'idBack', 'utilityBill'];
-
-    for (const field of fieldNames) {
-      if (req.files[field]) {
-        uploadTasks[field] = await uploadToCloudinary(req.files[field][0].buffer);
+      if (existingReq.rows.length > 0) {
+        return res
+          .status(409)
+          .json({
+            success: false,
+            error: "Only one join request is allowed pending approval.",
+          });
       }
-    }
 
-    // 3. Insert into PostgreSQL using the secure Cloudinary URLs
-    const result = await pool.query(
-      `INSERT INTO join_requests 
+      const blockCheck = await pool.query(
+        `SELECT id FROM estate_admin_users 
+     WHERE estate_id = $1 AND $2 = ANY(blocked_tenant_ids)`,
+        [estateId, tempTenantId],
+      );
+
+      if (blockCheck.rows.length > 0) {
+        return res.status(403).json({
+          success: false,
+          error:
+            "Your account has been restricted by this estate's administration.",
+        });
+      }
+
+      await pool.query(
+        "UPDATE temp_tenant_users SET rejection_message = NULL, is_read = FALSE WHERE id = $1",
+        [tempTenantId],
+      );
+
+      const uploadTasks = {};
+      const fieldNames = ["selfie", "idFront", "idBack", "utilityBill"];
+
+      for (const field of fieldNames) {
+        if (req.files[field]) {
+          uploadTasks[field] = await uploadToCloudinary(
+            req.files[field][0].buffer,
+          );
+        }
+      }
+
+      // 3. Insert into PostgreSQL using the secure Cloudinary URLs
+      const result = await pool.query(
+        `INSERT INTO join_requests 
        (temp_tenant_id, estate_id, block, unit, id_type, selfie_url, id_front_url, id_back_url, utility_bill_url)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [
-        tempTenantId, 
-        estateId, 
-        block || null, 
-        unit || null, 
-        idType || null,
-        uploadTasks['selfie'] || null,
-        uploadTasks['idFront'] || null,
-        uploadTasks['idBack'] || null,
-        uploadTasks['utilityBill'] || null
-      ]
-    );
+        [
+          tempTenantId,
+          estateId,
+          block || null,
+          unit || null,
+          idType || null,
+          uploadTasks["selfie"] || null,
+          uploadTasks["idFront"] || null,
+          uploadTasks["idBack"] || null,
+          uploadTasks["utilityBill"] || null,
+        ],
+      );
 
-    res.status(201).json({
-      success: true,
-      message: "Join request submitted with Cloudinary storage",
-      joinRequest: result.rows[0],
-    });
-  } catch (err) {
-    console.error("KYC Upload Error:", err);
-    res.status(500).json({ error: "Internal server error during upload" });
-  }
-});
+      res.status(201).json({
+        success: true,
+        message: "Join request submitted with Cloudinary storage",
+        joinRequest: result.rows[0],
+      });
+    } catch (err) {
+      console.error("KYC Upload Error:", err);
+      res.status(500).json({ error: "Internal server error during upload" });
+    }
+  },
+);
 
 // -------------------- Approve Tenant --------------------
 router.post("/approve-tenant/:joinRequestId", ensureAdmin, async (req, res) => {
@@ -235,12 +249,14 @@ router.post("/approve-tenant/:joinRequestId", ensureAdmin, async (req, res) => {
     // 1. Fetch the join request with all KYC document URLs
     const jrRes = await pool.query(
       `SELECT * FROM join_requests WHERE id = $1 AND status = 'PENDING'`,
-      [joinRequestId]
+      [joinRequestId],
     );
 
     if (jrRes.rows.length === 0) {
       await pool.query("ROLLBACK");
-      return res.status(404).json({ error: "Join request not found or processed" });
+      return res
+        .status(404)
+        .json({ error: "Join request not found or processed" });
     }
 
     const joinRequest = jrRes.rows[0];
@@ -248,7 +264,7 @@ router.post("/approve-tenant/:joinRequestId", ensureAdmin, async (req, res) => {
     // 2. Fetch the temporary tenant
     const tempRes = await pool.query(
       `SELECT * FROM temp_tenant_users WHERE id = $1`,
-      [joinRequest.temp_tenant_id]
+      [joinRequest.temp_tenant_id],
     );
 
     if (tempRes.rows.length === 0) {
@@ -281,34 +297,36 @@ router.post("/approve-tenant/:joinRequestId", ensureAdmin, async (req, res) => {
         joinRequest.id_back_url,
         joinRequest.utility_bill_url,
         true,
-        'TENANT'
-      ]
+        "TENANT",
+      ],
     );
 
     const newTenant = insertRes.rows[0];
 
     // 4. CLEANUP: Remove temp records
     const feedbackObj = JSON.stringify({
-      type: 'approve',
+      type: "approve",
       estate: joinRequest.estate_name,
-      message: "Your residency has been approved! Please log out and log back in to access the tenant dashboard."
+      message:
+        "Your residency has been approved! Please log out and log back in to access the tenant dashboard.",
     });
 
     await pool.query(
       "UPDATE temp_tenant_users SET rejection_message = $1, is_read = FALSE WHERE id = $2",
-      [feedbackObj, temp.id]
+      [feedbackObj, temp.id],
     );
-    
-    await pool.query("DELETE FROM join_requests WHERE id = $1", [joinRequestId]);
+
+    await pool.query("DELETE FROM join_requests WHERE id = $1", [
+      joinRequestId,
+    ]);
 
     await pool.query("COMMIT");
 
     res.json({
       success: true,
       message: `${newTenant.name} has been verified and fully promoted.`,
-      tenant: newTenant
+      tenant: newTenant,
     });
-
   } catch (err) {
     await pool.query("ROLLBACK");
     console.error("Approval Error:", err);
@@ -325,24 +343,26 @@ router.delete("/join-request/delete", ensureAdmin, async (req, res) => {
       `SELECT jr.temp_tenant_id, e.name as estate_name 
        FROM join_requests jr 
        JOIN estates e ON jr.estate_id = e.id 
-       WHERE jr.id = $1`, [id]
+       WHERE jr.id = $1`,
+      [id],
     );
 
-    if (infoRes.rows.length === 0) return res.status(404).json({ error: "Request not found" });
+    if (infoRes.rows.length === 0)
+      return res.status(404).json({ error: "Request not found" });
 
     const { temp_tenant_id, estate_name } = infoRes.rows[0];
 
     // Construct structured feedback
     const feedbackObj = JSON.stringify({
-      type: 'decline',
+      type: "decline",
       estate: estate_name,
-      message: message || ""
+      message: message || "",
     });
 
     await pool.query(
       "UPDATE temp_tenant_users SET rejection_message = $1, is_read = FALSE WHERE id = $2",
-      [feedbackObj, temp_tenant_id]
-    )
+      [feedbackObj, temp_tenant_id],
+    );
 
     await pool.query("DELETE FROM join_requests WHERE id = $1", [id]);
 
@@ -363,10 +383,12 @@ router.put("/join-request/block", ensureAdmin, async (req, res) => {
       `SELECT jr.temp_tenant_id, e.name as estate_name 
        FROM join_requests jr 
        JOIN estates e ON jr.estate_id = e.id 
-       WHERE jr.id = $1`, [id]
+       WHERE jr.id = $1`,
+      [id],
     );
 
-    if (infoRes.rows.length === 0) return res.status(404).json({ error: "Request not found" });
+    if (infoRes.rows.length === 0)
+      return res.status(404).json({ error: "Request not found" });
 
     const { temp_tenant_id, estate_name } = infoRes.rows[0];
 
@@ -375,20 +397,20 @@ router.put("/join-request/block", ensureAdmin, async (req, res) => {
       `UPDATE estate_admin_users 
        SET blocked_tenant_ids = array_append(blocked_tenant_ids, $1) 
        WHERE id = $2 AND NOT ($1 = ANY(blocked_tenant_ids))`,
-      [temp_tenant_id, adminId]
+      [temp_tenant_id, adminId],
     );
 
     // 2. Set structured feedback as 'block'
     const feedbackObj = JSON.stringify({
-      type: 'block',
+      type: "block",
       estate: estate_name,
-      message: message || "You have been restricted from this estate."
+      message: message || "You have been restricted from this estate.",
     });
 
     await pool.query(
       "UPDATE temp_tenant_users SET rejection_message = $1, is_read = FALSE WHERE id = $2",
-      [feedbackObj, temp_tenant_id]
-    )
+      [feedbackObj, temp_tenant_id],
+    );
 
     await pool.query("DELETE FROM join_requests WHERE id = $1", [id]);
 
@@ -408,20 +430,19 @@ router.get("/my-request", ensureTempTenant, async (req, res) => {
        FROM join_requests jr
        JOIN estates e ON jr.estate_id = e.id
        WHERE jr.temp_tenant_id = $1 AND jr.status = 'PENDING'`,
-      [tempUserId]
+      [tempUserId],
     );
 
     const userRes = await pool.query(
       "SELECT rejection_message, is_read FROM temp_tenant_users WHERE id = $1",
-      [tempUserId]
+      [tempUserId],
     );
-
 
     res.json({
       success: true,
       activeRequest: activeRes.rows[0] || null,
       feedback: userRes.rows[0]?.rejection_message || null,
-      isRead: userRes.rows[0]?.is_read ?? false 
+      isRead: userRes.rows[0]?.is_read ?? false,
     });
   } catch (err) {
     console.error(err);
@@ -436,25 +457,27 @@ router.delete("/notification/dismiss", async (req, res) => {
   }
 
   const userId = req.user.id;
-  const isPermanentTenant = !!req.user.estate_id; 
+  const isPermanentTenant = !!req.user.estate_id;
 
   try {
     if (!isPermanentTenant) {
       console.log(`Dismissing temp notification for user: ${userId}`);
       await pool.query(
         "UPDATE temp_tenant_users SET rejection_message = NULL WHERE id = $1",
-        [userId]
+        [userId],
       );
-      
-      return res.json({ 
-        success: true, 
-        message: "Temporary notification dismissed" 
+
+      return res.json({
+        success: true,
+        message: "Temporary notification dismissed",
       });
     } else {
-      console.log(`Delete notification requested for Permanent Tenant: ${userId}`);
-      return res.json({ 
-        success: true, 
-        message: "Notification deletion logged (Full implementation pending)" 
+      console.log(
+        `Delete notification requested for Permanent Tenant: ${userId}`,
+      );
+      return res.json({
+        success: true,
+        message: "Notification deletion logged (Full implementation pending)",
       });
     }
   } catch (err) {
@@ -471,7 +494,7 @@ router.put("/notification/read", async (req, res) => {
 
   const userId = req.user.id;
   // Permanent tenants have an estate_id assigned to their profile
-  const isPermanentTenant = !!req.user.estate_id; 
+  const isPermanentTenant = !!req.user.estate_id;
 
   try {
     if (!isPermanentTenant) {
@@ -479,21 +502,23 @@ router.put("/notification/read", async (req, res) => {
       console.log(`Marking temp notification as read for user: ${userId}`);
       await pool.query(
         "UPDATE temp_tenant_users SET is_read = TRUE WHERE id = $1",
-        [userId]
+        [userId],
       );
-      
-      return res.json({ 
-        success: true, 
-        message: "Temp notification marked as read" 
+
+      return res.json({
+        success: true,
+        message: "Temp notification marked as read",
       });
     } else {
       // 2. Placeholder for Permanent Tenant logic
-      console.log(`Mark as read requested for Permanent Tenant: ${userId} in Estate: ${req.user.estate_id}`);
+      console.log(
+        `Mark as read requested for Permanent Tenant: ${userId} in Estate: ${req.user.estate_id}`,
+      );
       // Future: await pool.query("UPDATE notifications SET is_read = TRUE WHERE user_id = $1", [userId]);
-      
-      return res.json({ 
-        success: true, 
-        message: "Permanent tenant read status logged (Implementation pending)" 
+
+      return res.json({
+        success: true,
+        message: "Permanent tenant read status logged (Implementation pending)",
       });
     }
   } catch (err) {
@@ -515,7 +540,7 @@ router.get("/blocked-users", ensureAdmin, async (req, res) => {
          FROM estate_admin_users 
          WHERE id = $1
        )`,
-      [adminId]
+      [adminId],
     );
 
     res.json({
@@ -538,13 +563,13 @@ router.put("/join-request/unblock", ensureAdmin, async (req, res) => {
       `UPDATE estate_admin_users 
        SET blocked_tenant_ids = array_remove(blocked_tenant_ids, $1) 
        WHERE id = $2`,
-      [tempTenantId, adminId]
+      [tempTenantId, adminId],
     );
 
     // Optional: Clear the 'block' message for the user so they can try again
     await pool.query(
       "UPDATE temp_tenant_users SET rejection_message = NULL WHERE id = $1",
-      [tempTenantId]
+      [tempTenantId],
     );
 
     res.json({ success: true, message: "User has been unblocked." });
@@ -603,12 +628,14 @@ router.post("/set-payment-info", isAuth, async (req, res) => {
 
 // -------------------- Update Push Token (Secure) --------------------
 router.post("/update-push-token", async (req, res) => {
-  const userId = req.user?.id; 
+  const userId = req.body.userId || req.user?.id;
   const { pushToken } = req.body;
-  console.log("Push Token:", pushToken)
+  console.log("Push Token:", pushToken);
 
   if (!userId) {
-    return res.status(401).json({ error: "Unauthorized: User session not found." });
+    return res
+      .status(401)
+      .json({ error: "Unauthorized: User session not found." });
   }
 
   if (!pushToken) {
@@ -618,7 +645,7 @@ router.post("/update-push-token", async (req, res) => {
   try {
     const result = await pool.query(
       `UPDATE tenant_users SET push_token = $1 WHERE id = $2 RETURNING id, name`,
-      [pushToken, userId]
+      [pushToken, userId],
     );
 
     if (result.rows.length === 0) {
@@ -628,7 +655,7 @@ router.post("/update-push-token", async (req, res) => {
     res.json({
       success: true,
       message: "Push token linked to your account",
-      user: result.rows[0]
+      user: result.rows[0],
     });
   } catch (err) {
     console.error("Update Push Token Error:", err);
@@ -645,34 +672,39 @@ router.post("/send-group-notification", async (req, res) => {
     return res.status(400).json({ error: "memberIds array is required" });
   }
 
-  const uuidIds = memberIds.filter(id => typeof id === 'string' && id.length > 0);
+  const uuidIds = memberIds.filter(
+    (id) => typeof id === "string" && id.length > 0,
+  );
 
   try {
     const result = await pool.query(
       `SELECT push_token FROM tenant_users 
        WHERE id = ANY($1::uuid[]) AND id != $2::uuid AND push_token IS NOT NULL`,
-      [uuidIds, currentUserId]
+      [uuidIds, currentUserId],
     );
 
-    const targetTokens = result.rows.map(r => r.push_token);
+    const targetTokens = result.rows.map((r) => r.push_token);
 
     if (targetTokens.length === 0) {
-      return res.json({ success: true, message: "No recipients with push tokens found." });
+      return res.json({
+        success: true,
+        message: "No recipients with push tokens found.",
+      });
     }
 
     // 2. Prepare the Expo notification batch
-    const notifications = targetTokens.map(token => ({
+    const notifications = targetTokens.map((token) => ({
       to: token,
       sound: "default",
       title: groupName || "Estate Group",
       body: `${senderName}: ${text || "Sent an attachment"}`,
-      data: { 
-        type: "chat", 
-        roomId: roomId, 
+      data: {
+        type: "chat",
+        roomId: roomId,
         isGroup: true,
         senderName: senderName,
       },
-      channelId: "default"
+      channelId: "default",
     }));
 
     // 3. Fire to Expo (Backend to Backend)
@@ -685,15 +717,19 @@ router.post("/send-group-notification", async (req, res) => {
     res.json({ success: true, count: targetTokens.length });
   } catch (err) {
     console.error("Group Push Error:", err);
-    res.status(500).json({ error: "Internal server error dispatching group push" });
+    res
+      .status(500)
+      .json({ error: "Internal server error dispatching group push" });
   }
 });
 
 // POST /api/auth/send-otp
 router.post("/send-otp", async (req, res) => {
-  console.log('profile otp api hit')
-  const { target, type } = req.body; 
-  const adminId = req.user.id
+  console.log("profile otp api hit");
+  const { target, type } = req.body;
+  const adminId = req.user.id;
+  const normalizedTarget = target.trim();
+  console.log("Generated Normalized Target:", normalizedTarget);
 
   const checkUser = await pool.query(
     `SELECT id FROM estate_admin_users 
@@ -708,21 +744,25 @@ router.post("/send-otp", async (req, res) => {
       message: `This ${type} is already registered to another account.`,
     });
   }
+  const OTP_SECRET = process.env.OTP_SECRET;
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expires = Date.now() + 10 * 60000; // 10 mins
+  const expires = Date.now() + 10 * 60000;
 
   // Create hash using the target (phone or email)
-  const data = `${target}.${otp}.${expires}`;
+  const data = `${normalizedTarget}.${otp}.${expires}`;
   const hash = crypto
-    .createHmac("sha256", process.env.OTP_SECRET)
+    .createHmac("sha256", OTP_SECRET)
     .update(data)
     .digest("hex");
-  
+    console.log("Generated Data for OTP Hashing:", data);
+    console.log("Generated Hash:", hash);
   const metadata = `${hash}.${expires}`;
+  console.log("Generate OTP Metadata:", metadata);
+  console.log("Generated OTP:", otp);
 
   try {
     if (type === "email") {
-      console.log("send email otp for profile edit")
+      console.log("send email otp for profile edit");
       const emailSent = await sendRegistrationOTP(target, otp);
       if (emailSent) {
         res.json({ success: true, metadata });
@@ -731,38 +771,101 @@ router.post("/send-otp", async (req, res) => {
       }
     } else {
       // For phone/SMS, return OTP in dev or call your SMS provider
-      return res.json({ success: true, metadata, otp: process.env.MODE === 'development' ? otp : undefined });
+      return res.json({
+        success: true,
+        metadata,
+        otp: process.env.MODE === "development" ? otp : undefined,
+      });
     }
   } catch (err) {
     res.status(500).json({ success: false, message: "Failed to send OTP" });
   }
 });
 
+router.post("/tenant/send-otp", async (req, res) => {
+  console.log("profile otp api hit");
+  const { target, type } = req.body;
+  const tenantId = req.user.id;
+  const normalizedTarget = target.trim();
+  console.log("Generated Normalized Target:", normalizedTarget);
+
+  const checkUser = await pool.query(
+    `SELECT id FROM tenant_users 
+       WHERE (email = $1 OR phone = $1) 
+       AND id != $2`,
+    [target, tenantId],
+  );
+
+  if (checkUser.rows.length > 0) {
+    return res.status(400).json({
+      success: false,
+      message: `This ${type} is already registered to another account.`,
+    });
+  }
+  const OTP_SECRET = process.env.OTP_SECRET;
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const expires = Date.now() + 10 * 60000;
+
+  // Create hash using the target (phone or email)
+  const data = `${normalizedTarget}.${otp}.${expires}`;
+  const hash = crypto
+    .createHmac("sha256", OTP_SECRET)
+    .update(data)
+    .digest("hex");
+    console.log("Generated Data for OTP Hashing:", data);
+    console.log("Generated Hash:", hash);
+  const metadata = `${hash}.${expires}`;
+  console.log("Generate OTP Metadata:", metadata);
+  console.log("Generated OTP:", otp);
+
+  try {
+    if (type === "email") {
+      console.log("send email otp for profile edit");
+      const emailSent = await sendRegistrationOTP(target, otp);
+      if (emailSent) {
+        res.json({ success: true, metadata });
+      } else {
+        res.status(500).json({ error: "Failed to send email" });
+      }
+    } else {
+      // For phone/SMS, return OTP in dev or call your SMS provider
+      return res.json({
+        success: true,
+        metadata,
+        otp: process.env.MODE === "development" ? otp : undefined,
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Failed to send OTP" });
+  }
+});
 
 router.post("/verify-otp-only", async (req, res) => {
   const { otp, metadata, target } = req.body;
 
+  console.log("Verifying OTP with metadata:", metadata, "and target:", target);
   try {
     // 1. Normalize the target (Remove spaces and lowercase email)
-    const normalizedTarget = target.trim().toLowerCase();
+    const normalizedTarget = target.trim();
+    console.log("Normalized Target for OTP Verification:", normalizedTarget);
 
     const [hash, expires] = metadata.split(".");
+    console.log("Extracted Hash:", hash);
+    console.log("Extracted Expires:", expires);
 
-    // 2. Check Expiry
     if (Date.now() > parseInt(expires)) {
-      return res.status(400).json({ success: false, message: "OTP expired." });
+      return res.status(400).json({ error: "OTP expired. Please resend." });
     }
 
     // 3. Re-create the hash using the EXACT same format as the send route
     const data = `${normalizedTarget}.${otp}.${expires}`;
+    console.log("Data for OTP Hash Verification:", data);
     const verifyHash = crypto
       .createHmac("sha256", process.env.OTP_SECRET)
       .update(data)
       .digest("hex");
+    console.log("Recreated Hash for Verification:", verifyHash);
 
-    // 4. Comparison Fix
-    // Instead of timingSafeEqual (which crashes on unequal lengths),
-    // use a simple comparison for hex strings.
     if (verifyHash !== hash) {
       return res.json({ success: false, message: "Invalid OTP code." });
     }
@@ -771,6 +874,66 @@ router.post("/verify-otp-only", async (req, res) => {
   } catch (err) {
     console.error("Verification Error:", err);
     res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.post("/tenant/update-config", isAuth, async (req, res) => {
+  console.log("Update tenant profile api hit");
+  const { email, phone } = req.body;
+  const userId = req.user.id;
+  const isTemp = req.user.isTemp === true; 
+  console.log(`Updating profile for user ${userId} (Temp: ${isTemp}) with email: ${email} and phone: ${phone}`);
+
+  // Determine which table to target
+  const tableName = isTemp ? "temp_tenant_users" : "tenant_users";
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    // We only allow residents to update email and phone.
+    // Name, Block, and Unit are usually locked after verification for security.
+    const updateQuery = `
+      UPDATE ${tableName} 
+      SET email = $1, phone = $2 
+      WHERE id = $3 
+      RETURNING *`;
+
+    const values = [email.trim(), phone.trim(), userId];
+
+    const result = await client.query(updateQuery, values);
+
+    if (result.rowCount === 0) {
+      throw new Error("User not found");
+    }
+
+    await client.query("COMMIT");
+
+    const updatedUser = result.rows[0];
+
+    delete updatedUser.password;
+
+    res.json({
+      success: true,
+      message: "Profile updated successfully",
+      user: updatedUser,
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Resident Update Error:", err);
+
+    // Handle unique constraint violations (e.g., email already exists)
+    if (err.code === "23505") {
+      return res.status(400).json({
+        success: false,
+        message: "Email or Phone number is already in use by another resident.",
+      });
+    }
+
+    res.status(500).json({ success: false, message: "Internal server error" });
+  } finally {
+    client.release();
   }
 });
 
@@ -809,7 +972,7 @@ router.post("/update-config", ensureAdmin, async (req, res) => {
         external_api_url = $6,
         emergency_contacts = $7
       WHERE id = $8`;
-    
+
     const estateValues = [
       config.bank_details.bank_name,
       config.bank_details.bank_code,
@@ -817,7 +980,7 @@ router.post("/update-config", ensureAdmin, async (req, res) => {
       config.bank_details.account_name,
       config.payment_type,
       config.external_api_url,
-      JSON.stringify(config.emergency_contacts), 
+      JSON.stringify(config.emergency_contacts),
       estateId,
     ];
     await client.query(estateQuery, estateValues);
@@ -833,15 +996,14 @@ router.post("/update-config", ensureAdmin, async (req, res) => {
       payment_type: config.payment_type,
       external_api_url: config.external_api_url,
       emergency_contacts: config.emergency_contacts,
-      estate_id: estateId
+      estate_id: estateId,
     };
 
     res.json({
       success: true,
       message: "Configuration updated successfully",
-      user: updatedUser
+      user: updatedUser,
     });
-
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("Update Config Error:", err);
@@ -908,4 +1070,3 @@ router.delete("/terminate-account", isAuth, async (req, res) => {
 });
 
 export default router;
-

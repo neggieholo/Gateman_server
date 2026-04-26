@@ -326,6 +326,36 @@ export const sendPushNotification = async (token, title, body, data = {}) => {
   }
 };
 
+export const sendEmergencyCall = async (token, channelName, callerName) => {
+  try {
+    const message = {
+      to: token,
+      priority: "high",
+      android: {
+        priority: "high",
+        fullScreenIntent: true,
+      },
+      data: {
+        type: "EMERGENCY_CALL",
+        channelName: channelName, 
+        callerName: callerName,
+        isVoIP: true, 
+      },
+    };
+
+    const response = await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(message),
+    });
+
+    const resData = await response.json();
+    return resData;
+  } catch (err) {
+    console.error("Push Notification Error:", err);
+  }
+};
+
 // --- OVERSTAY ALERT ---
 // cron.schedule('*/10 * * * *', async () => {
 //   const client = await pool.connect(); 
@@ -428,7 +458,7 @@ const checkOverstays = async () => {
       AND i.is_cancelled = false
       AND (i.end_date + i.end_time) < NOW();
     `;
-    
+    // AND (i.end_date + i.end_time) < CURRENT_TIMESTAMP AT TIME ZONE 'UTC';
     const { rows: overstays } = await client.query(overstayQuery);
     if (overstays.length === 0) return;
 
