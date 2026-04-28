@@ -101,7 +101,8 @@ const configurePassport = (passport) => {
           );
 
           const user = result.rows[0];
-          if (!user) return done(null, false, { message: "Admin not found" });
+          console.log("User found in DB:", user ? "YES" : "NO");
+          if (!user) return done(null, false, { message: "User not found" });
 
           const match = await bcrypt.compare(password, user.password);
           if (!match)

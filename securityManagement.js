@@ -2,6 +2,7 @@ import express from "express";
 import pool from "./db.js";
 import multer from "multer";
 import { v2 as cloudinary } from "cloudinary";
+import { isAuth } from "./middlewares.js";
 
 const router = express.Router();
 
@@ -753,6 +754,170 @@ router.post("/update-push-token", async (req, res) => {
     });
   } catch (err) {
     console.error("Security Push Token Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Submit a Report (Resident/User) --------------------
+router.post("/report", async (req, res) => {
+  const { 
+    type, 
+    category, 
+    target_security_ids, 
+    subject, 
+    description 
+  } = req.body;
+
+  console.log("Received report submission:", req.body);
+  const estate_id = req.user?.estate_id;
+  const reporter_id = req.user?.id;
+
+  if (!estate_id || !reporter_id || !subject || !description) {
+    return res.status(400).json({ error: "Missing required report fields." });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO estate_reports 
+       (estate_id, reporter_id, type, category, target_security_ids, subject, description)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [
+        estate_id,
+        reporter_id,
+        type, // 'GENERAL' or 'SECURITY'
+        category, // 'COMPLAINT', 'INFORMATION', 'EMERGENCY'
+        target_security_ids || [], // Array of UUIDs
+        subject,
+        description
+      ]
+    );
+
+    res.status(201).json({ 
+      success: true, 
+      message: "Report submitted successfully", 
+      report: result.rows[0] 
+    });
+  } catch (err) {
+    console.error("Report Submission Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -------------------- Fetch Reports (Admin View) --------------------
+router.get("/report", ensureAdmin, async (req, res) => {
+  const estateId = req.user.estate_id;
+  // console.log(`Fetching reports for estate_id: ${estateId} by admin_id: ${req.user.id}`);
+
+  try {
+    const result = await pool.query(
+      `SELECT r.*, u.name as reporter_name 
+       FROM estate_reports r
+       JOIN tenant_users u ON r.reporter_id = u.id
+       WHERE r.estate_id = $1
+       ORDER BY r.created_at DESC`,
+      [estateId]
+    );
+    
+    console.log(`Fetched ${result.rows.length} reports for estate_id: ${estateId}`);
+    res.json({ success: true, reports: result.rows });
+  } catch (err) {
+    console.error("Fetch Reports Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /my-reports - Fetch reports submitted by the logged-in resident
+router.get("/my-reports", isAuth, async (req, res) => {
+  const reporterId = req.user.id;
+  const estateId = req.user.estate_id;
+
+  try {
+    const result = await pool.query(
+      `SELECT * FROM estate_reports 
+       WHERE reporter_id = $1 AND estate_id = $2
+       ORDER BY created_at DESC`,
+      [reporterId, estateId]
+    );
+
+    console.log(`Fetched ${result.rows.length} personal reports for user_id: ${reporterId}`);
+    
+    res.json({ 
+      success: true, 
+      reports: result.rows 
+    });
+  } catch (err) {
+    console.error("Fetch My Reports Error:", err);
+    res.status(500).json({ 
+      success: false, 
+      error: "Internal server error" 
+    });
+  }
+});
+
+// -------------------- Update Report Status --------------------
+router.patch("/report/status/:id", ensureAdmin, async (req, res) => {
+  console.log("Updating report status with data:", req.params, req.body);
+  const { id } = req.params;
+  const { status } = req.body; // 'REVIEWED' or 'RESOLVED'
+  const estate_id = req.user.estate_id;
+
+  try {
+    const result = await pool.query(
+      `UPDATE estate_reports 
+       SET status = $1 
+       WHERE id = $2 AND estate_id = $3 
+       RETURNING *`,
+      [status, id, estate_id],
+    );
+
+    if (result.rows.length === 0)
+      return res.status(404).json({ error: "Report not found" });
+    res.json({ success: true, report: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update status" });
+  }
+});
+
+// -------------------- Delete Report (Resident Only) --------------------
+router.delete("/:id", async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id; 
+
+  try {
+    const result = await pool.query(
+      "DELETE FROM estate_reports WHERE id = $1 AND reporter_id = $2 RETURNING id",
+      [id, userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(403).json({ 
+        error: "Unauthorized: You can only delete your own reports." 
+      });
+    }
+    
+    res.json({ success: true, message: "Report deleted." });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete report" });
+  }
+});
+
+router.delete("/my-reports/:id", isAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    // ensure the report belongs to this user
+    const result = await pool.query(
+      "DELETE FROM estate_reports WHERE id = $1 AND reporter_id = $2 RETURNING *",
+      [id, req.user.id],
+    );
+
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Report not found" });
+    }
+
+    res.json({ success: true, message: "Deleted successfully" });
+  } catch (err) {
     res.status(500).json({ error: "Internal server error" });
   }
 });

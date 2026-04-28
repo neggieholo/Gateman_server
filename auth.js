@@ -125,7 +125,6 @@ router.post("/login/tenant", (req, res, next) => {
   })(req, res, next);
 });
 
-
 // ------------------ Admin Login ------------------
 router.post("/login/admin", (req, res, next) => {
   passport.authenticate("admin-local", (err, user, info) => {
@@ -143,7 +142,6 @@ router.post("/login/admin", (req, res, next) => {
     });
   })(req, res, next);
 });
-
 
 // ------------------ Register Security ------------------
 router.post("/register/security", async (req, res, next) => {
