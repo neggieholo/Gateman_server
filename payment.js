@@ -3,6 +3,7 @@ import bcrypt from "bcrypt";
 import axios from "axios";
 import pool from "./db.js";
 import crypto from "crypto";
+import { isAuth } from "./middlewares.js";
 
 const router = express.Router();
 
@@ -136,17 +137,11 @@ router.post("/paystack-webhook", async (req, res) => {
 
     await client.query("BEGIN");
 
-   
     // Create Estate
     const estateCode = crypto.randomBytes(3).toString("hex").toUpperCase();
     const estateResult = await client.query(
       "INSERT INTO estates (name, estate_code, state,lga ) VALUES ($1, $2, $3, $4) RETURNING id",
-      [
-        `${tempUser.name} Estate`,
-        estateCode,
-        tempUser.state,
-        tempUser.lga
-      ],
+      [`${tempUser.name} Estate`, estateCode, tempUser.state, tempUser.lga],
     );
     const estateId = estateResult.rows[0].id;
 
@@ -164,7 +159,7 @@ router.post("/paystack-webhook", async (req, res) => {
         tempUser.email,
         tempUser.password,
         subscriptionExpiry,
-        "ADMIN"
+        "ADMIN",
       ],
     );
 
@@ -208,6 +203,90 @@ router.get("/callback", async (req, res) => {
   } catch (err) {
     console.error("Verification Error:", err.response?.data || err.message);
     res.redirect(`http://localhost:3005/payment-failure`);
+  }
+});
+
+// POST: Upload Payment Log
+router.post("/upload", isAuth, async (req, res) => {
+  const {
+    amount,
+    category,
+    transaction_reference,
+    receipt_url,
+    notes,
+    resident_name,
+    payment_date,
+    payment_type, 
+  } = req.body;
+
+  const { id: resident_id, estate_id } = req.user;
+
+  console.log("Received payment log upload paymentdate:", payment_date);
+  try {
+    const query = `
+      INSERT INTO payment_logs 
+      (resident_id, estate_id, amount, category, transaction_reference, receipt_url, notes, resident_name, payment_date, payment_type, status) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending') 
+      RETURNING *`;
+
+    const result = await pool.query(query, [
+      resident_id,
+      estate_id,
+      amount,
+      category,
+      transaction_reference,
+      receipt_url,
+      notes,
+      resident_name,
+      new Date(payment_date),
+      payment_type,
+    ]);
+
+    res.status(201).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET: Fetch History with Date Filtering
+router.get("/history", isAuth, async (req, res) => {
+  const { startDate, endDate } = req.query; 
+  console.log("Fetching history with filters:", { startDate, endDate });
+  const { id: resident_id, estate_id } = req.user;
+
+  try {
+    let query = `SELECT * FROM payment_logs WHERE resident_id = $1 AND estate_id = $2`;
+    const params = [resident_id, estate_id];
+
+    if (startDate && endDate) {
+      query += ` AND payment_date::DATE BETWEEN $3 AND $4`;
+      params.push(startDate, endDate);
+    }
+
+    query += ` ORDER BY created_at DESC`;
+
+    const result = await pool.query(query, params);
+    res.json({ success: true, history: result.rows });
+  } catch (error) {
+    res.status(500).json({ success: false, error: "Failed to fetch history" });
+  }
+});
+
+// DELETE: Remove a log (only if still pending)
+router.delete("/delete/:id", isAuth, async (req, res) => {
+  try {
+    console.log(`Attempting to delete log ID ${req.params.id} for resident ID ${req.user.id}`);
+    const query = `DELETE FROM payment_logs WHERE id = $1 AND resident_id = $2 AND status = 'pending' RETURNING *`;
+    const result = await pool.query(query, [req.params.id, req.user.id]);
+
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Log not found or already verified" });
+    }
+    res.json({ success: true, message: "Deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

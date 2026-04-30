@@ -100,10 +100,13 @@ router.get("/tenants", async (req, res) => {
       params = [estateId, currentUserId];
     } else {
       query = `
-        SELECT id, name, email, unit, block, avatar, estate_id, push_token 
-        FROM tenant_users 
+      SELECT id, name, email, phone, unit, block, avatar, 
+      id_type, id_front_url, id_back_url, utility_bill_url, 
+      estate_id, push_token, created_at
+      FROM tenant_users 
         WHERE estate_id = $1 
-        ORDER BY name ASC`;
+        ORDER BY name ASC
+    `;
       params = [estateId];
     }
 
@@ -168,12 +171,10 @@ router.post(
       );
 
       if (existingReq.rows.length > 0) {
-        return res
-          .status(409)
-          .json({
-            success: false,
-            error: "Only one join request is allowed pending approval.",
-          });
+        return res.status(409).json({
+          success: false,
+          error: "Only one join request is allowed pending approval.",
+        });
       }
 
       const blockCheck = await pool.query(
@@ -754,8 +755,8 @@ router.post("/send-otp", async (req, res) => {
     .createHmac("sha256", OTP_SECRET)
     .update(data)
     .digest("hex");
-    console.log("Generated Data for OTP Hashing:", data);
-    console.log("Generated Hash:", hash);
+  console.log("Generated Data for OTP Hashing:", data);
+  console.log("Generated Hash:", hash);
   const metadata = `${hash}.${expires}`;
   console.log("Generate OTP Metadata:", metadata);
   console.log("Generated OTP:", otp);
@@ -812,8 +813,8 @@ router.post("/tenant/send-otp", async (req, res) => {
     .createHmac("sha256", OTP_SECRET)
     .update(data)
     .digest("hex");
-    console.log("Generated Data for OTP Hashing:", data);
-    console.log("Generated Hash:", hash);
+  console.log("Generated Data for OTP Hashing:", data);
+  console.log("Generated Hash:", hash);
   const metadata = `${hash}.${expires}`;
   console.log("Generate OTP Metadata:", metadata);
   console.log("Generated OTP:", otp);
@@ -881,8 +882,10 @@ router.post("/tenant/update-config", isAuth, async (req, res) => {
   console.log("Update tenant profile api hit");
   const { email, phone } = req.body;
   const userId = req.user.id;
-  const isTemp = req.user.isTemp === true; 
-  console.log(`Updating profile for user ${userId} (Temp: ${isTemp}) with email: ${email} and phone: ${phone}`);
+  const isTemp = req.user.isTemp === true;
+  console.log(
+    `Updating profile for user ${userId} (Temp: ${isTemp}) with email: ${email} and phone: ${phone}`,
+  );
 
   // Determine which table to target
   const tableName = isTemp ? "temp_tenant_users" : "tenant_users";
@@ -1010,6 +1013,88 @@ router.post("/update-config", ensureAdmin, async (req, res) => {
     res.status(500).json({ success: false, message: "Internal server error" });
   } finally {
     client.release();
+  }
+});
+
+router.get("/payment-settings", isAuth, async (req, res) => {
+  try {
+    const estateId = req.user.estate_id;
+
+    if (!estateId) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Estate ID not found in session." });
+    }
+
+    const query = `
+      SELECT 
+        payment_type, 
+        bank_name, 
+        bank_account_number, 
+        bank_account_name, 
+        external_api_url 
+      FROM estates 
+      WHERE id = $1
+    `;
+
+    const result = await pool.query(query, [estateId]);
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Estate settings not found." });
+    }
+
+    const estate = result.rows[0];
+    const mode = estate.payment_type;
+
+    // Constructing the response dynamically
+    const responseData = {
+      payment_type: mode,
+      details:
+        mode === "API"
+          ? { external_api_url: estate.external_api_url }
+          : {
+              bank_name: estate.bank_name,
+              bank_account_number: estate.bank_account_number,
+              bank_account_name: estate.bank_account_name,
+            },
+    };
+
+    res.status(200).json({
+      success: true,
+      data: responseData,
+    });
+  } catch (error) {
+    console.error("Error fetching payment settings:", error);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// GET /api/estates/emergency-contacts
+router.get("/emergency-contacts", isAuth, async (req, res) => {
+  const { estate_id } = req.user;
+
+  try {
+    const query = `SELECT emergency_contacts FROM estates WHERE id = $1`;
+    const result = await pool.query(query, [estate_id]);
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Estate not found" });
+    }
+
+    let rawData = result.rows[0].emergency_contacts;
+
+    // Parse if it's a string, otherwise use as is
+    const contacts =
+      typeof rawData === "string" ? JSON.parse(rawData) : rawData;
+
+    res.json({ success: true, contacts: contacts || [] });
+  } catch (err) {
+    console.error("Fetch Emergency Contacts Error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 

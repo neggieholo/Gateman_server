@@ -759,47 +759,41 @@ router.post("/update-push-token", async (req, res) => {
 });
 
 // -------------------- Submit a Report (Resident/User) --------------------
-router.post("/report", async (req, res) => {
-  const { 
-    type, 
-    category, 
-    target_security_ids, 
-    subject, 
-    description 
+router.post("/report", isAuth, async (req, res) => {
+  const {
+    type,
+    category,
+    subject,
+    description,
+    payment_id,
+    target_security_ids,
   } = req.body;
 
-  console.log("Received report submission:", req.body);
   const estate_id = req.user?.estate_id;
   const reporter_id = req.user?.id;
 
-  if (!estate_id || !reporter_id || !subject || !description) {
-    return res.status(400).json({ error: "Missing required report fields." });
-  }
-
   try {
-    const result = await pool.query(
-      `INSERT INTO estate_reports 
-       (estate_id, reporter_id, type, category, target_security_ids, subject, description)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [
-        estate_id,
-        reporter_id,
-        type, // 'GENERAL' or 'SECURITY'
-        category, // 'COMPLAINT', 'INFORMATION', 'EMERGENCY'
-        target_security_ids || [], // Array of UUIDs
-        subject,
-        description
-      ]
-    );
+    const query = `
+      INSERT INTO estate_reports 
+      (estate_id, reporter_id, type, category, subject, description, linked_payment_id, target_security_ids)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
+      RETURNING *`;
 
-    res.status(201).json({ 
-      success: true, 
-      message: "Report submitted successfully", 
-      report: result.rows[0] 
-    });
+    const result = await pool.query(query, [
+      estate_id,
+      reporter_id,
+      type,
+      category,
+      subject,
+      description,
+      payment_id || null, // Handles non-payment reports gracefully
+      target_security_ids || [],
+    ]);
+
+    res.status(201).json({ success: true, report: result.rows[0] });
   } catch (err) {
-    console.error("Report Submission Error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("DB Error:", err.message);
+    res.status(500).json({ error: "Failed to submit report" });
   }
 });
 
@@ -856,25 +850,28 @@ router.get("/my-reports", isAuth, async (req, res) => {
 
 // -------------------- Update Report Status --------------------
 router.patch("/report/status/:id", ensureAdmin, async (req, res) => {
-  console.log("Updating report status with data:", req.params, req.body);
   const { id } = req.params;
-  const { status } = req.body; // 'REVIEWED' or 'RESOLVED'
+  const { status, admin_response } = req.body; // Destructure the new field
   const estate_id = req.user.estate_id;
 
   try {
     const result = await pool.query(
       `UPDATE estate_reports 
-       SET status = $1 
-       WHERE id = $2 AND estate_id = $3 
+       SET status = $1, 
+           admin_response = $2
+       WHERE id = $3 AND estate_id = $4 
        RETURNING *`,
-      [status, id, estate_id],
+      [status, admin_response || null, id, estate_id],
     );
 
-    if (result.rows.length === 0)
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: "Report not found" });
+    }
+
     res.json({ success: true, report: result.rows[0] });
   } catch (err) {
-    res.status(500).json({ error: "Failed to update status" });
+    console.error("Database Error:", err);
+    res.status(500).json({ error: "Failed to update status and response" });
   }
 });
 
