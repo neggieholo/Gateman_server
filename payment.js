@@ -214,12 +214,11 @@ router.post("/upload", isAuth, async (req, res) => {
     transaction_reference,
     receipt_url,
     notes,
-    resident_name,
     payment_date,
     payment_type, 
   } = req.body;
 
-  const { id: resident_id, estate_id } = req.user;
+  const { id: resident_id, estate_id, name } = req.user;
 
   console.log("Received payment log upload paymentdate:", payment_date);
   try {
@@ -237,7 +236,7 @@ router.post("/upload", isAuth, async (req, res) => {
       transaction_reference,
       receipt_url,
       notes,
-      resident_name,
+      name,
       new Date(payment_date),
       payment_type,
     ]);
@@ -272,6 +271,77 @@ router.get("/history", isAuth, async (req, res) => {
   }
 });
 
+// GET: Fetch all estate payments for frontend-side filtering
+router.get("/all-payments", isAuth, async (req, res) => {
+  const { estate_id } = req.user;
+
+  if (!estate_id) {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+
+  try {
+    const query = `SELECT * FROM payment_logs WHERE estate_id = $1 ORDER BY created_at DESC`;
+    const result = await pool.query(query, [estate_id]);
+
+    res.json({
+      success: true,
+      payments: result.rows,
+    });
+  } catch (error) {
+    console.error("Admin fetch payments error:", error);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// PATCH: Verify or Reject a payment log
+// URL: /api/payment/verify/:id
+router.patch("/verify/:id", isAuth, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body; // Expecting 'verified' or 'rejected'
+  const { estate_id } = req.user;
+
+  // 1. Validation
+  if (!['verified', 'rejected'].includes(status)) {
+    return res.status(400).json({ 
+      success: false, 
+      error: "Invalid status. Must be 'verified' or 'rejected'." 
+    });
+  }
+
+  try {
+    // 2. Update query
+    // We filter by estate_id for security to ensure the admin belongs to this estate
+    const query = `
+      UPDATE payment_logs 
+      SET status = $1, verified_at = NOW()
+      WHERE id = $2 AND estate_id = $3
+      RETURNING *`;
+
+    const result = await pool.query(query, [status, id, estate_id]);
+
+    // 3. Check if the record existed and was updated
+    if (result.rowCount === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: "Payment record not found or unauthorized." 
+      });
+    }
+
+    // 4. Return the updated record
+    res.json({ 
+      success: true, 
+      message: `Payment ${status} successfully`, 
+      data: result.rows[0] 
+    });
+
+  } catch (error) {
+    console.error("Verification Error:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: "Internal server error" 
+    });
+  }
+});
 // DELETE: Remove a log (only if still pending)
 router.delete("/delete/:id", isAuth, async (req, res) => {
   try {

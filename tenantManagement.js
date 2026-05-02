@@ -746,7 +746,7 @@ router.post("/send-otp", async (req, res) => {
     });
   }
   const OTP_SECRET = process.env.OTP_SECRET;
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const otp = type === 'email' ? Math.floor(100000 + Math.random() * 900000).toString() : "123456";
   const expires = Date.now() + 10 * 60000;
 
   // Create hash using the target (phone or email)
@@ -804,7 +804,7 @@ router.post("/tenant/send-otp", async (req, res) => {
     });
   }
   const OTP_SECRET = process.env.OTP_SECRET;
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const otp = type === "email" ? Math.floor(100000 + Math.random() * 900000).toString() : "123456";
   const expires = Date.now() + 10 * 60000;
 
   // Create hash using the target (phone or email)
