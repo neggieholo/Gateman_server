@@ -6,6 +6,7 @@ const router = express.Router();
 
 router.get("/", isAuth, async (req, res) => {
   const { id, estate_id, role } = req.user;
+  // console.log("Fetching notifications for user:", { id, estate_id, role });
   
   try {
     // 1. Get the notifications (This part remains the same)
@@ -17,6 +18,7 @@ router.get("/", isAuth, async (req, res) => {
       ORDER BY created_at DESC LIMIT 50`, 
       [estate_id, id, role.toLowerCase()]
     );
+    // console.log("Fetched notifications:", notifs.rows.length);
 
     // 2. Determine which table to check for the 'lastReadAt' timestamp
     // We sanitize the role check to ensure we hit the right table
@@ -25,6 +27,8 @@ router.get("/", isAuth, async (req, res) => {
       userTable = "security_users";
     } else if (role === 'TENANT') {
       userTable = "tenant_users";
+    } else if (role === 'ADMIN') {
+      userTable = "estate_admin_users";
     } else {
       return res.status(400).json({ error: "Invalid user role for notifications" });
     }
@@ -53,9 +57,9 @@ router.put("/read-all", isAuth, async (req, res) => {
 
   // 1. Map roles to their respective tables
   const tableMap = {
+    admin: "estate_admin_users",
     tenant: "tenant_users",
     security: "security_users"
-    // admin: "admin_users" // Optional, if admins have notifications too
   };
 
   const tableName = tableMap[role?.toLowerCase()];
@@ -77,8 +81,29 @@ router.put("/read-all", isAuth, async (req, res) => {
   }
 });
 
+router.delete("/delete-all", isAuth, async (req, res) => {
+  const { id, role, estate_id } = req.user;
+
+  try {
+    await pool.query(
+      `UPDATE notifications 
+       SET is_deleted = TRUE 
+       WHERE estate_id = $1 
+       AND user_id = $2 
+       AND recipient_role = $3`,
+      [estate_id, id, role.toLowerCase()],
+    );
+
+    res.json({ success: true, message: "All notifications cleared" });
+  } catch (err) {
+    console.error("Delete All Error:", err);
+    res.status(500).json({ error: "Failed to clear notifications" });
+  }
+});
+
 
 router.delete("/:id", isAuth, async (req, res) => {
+  console.log("Deleting notification for user:", { id: req.user.id, estate_id: req.user.estate_id, role: req.user.role });
   const { id: userId, role } = req.user;
   const notificationId = req.params.id;
 
@@ -102,5 +127,6 @@ router.delete("/:id", isAuth, async (req, res) => {
     res.status(500).json({ error: "Database error" });
   }
 });
+
 
 export default router;

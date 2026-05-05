@@ -22,6 +22,7 @@ import EventsRoute from "./events.js";
 import KYCRoute from "./AdminKYC.js";
 import VendorKYCRoute from "./VendorKYC.js";
 import VendorRoute from "./vendor.js";
+import DashboardRoute from "./dashboard.js";
 import SuperAdminRoute from "./super_admin.js";
 import crypto from "crypto";
 import { sendPasswordResetCode } from "./emailService.js";
@@ -102,11 +103,12 @@ app.use("/api/invitations", invitationsRoute);
 app.use("/api/security", securityRoute);
 app.use("/api/notifications", NotificationsRoute);
 app.use("/api/event", EventsRoute);
+app.use("/api/dashboard", DashboardRoute);
 app.use("/api/kyc", KYCRoute);
 app.use("/api/master", SuperAdminRoute);
 app.use("/api/vendorkyc", VendorKYCRoute);
 app.use("/api/vendor", VendorRoute);
-
+app.use("/api/dashboard", DashboardRoute);
 app.get("/api/session-check", (req, res) => {
   if (req.isAuthenticated && req.isAuthenticated()) {
     res.json({ success: true, user: req.user });
@@ -401,14 +403,12 @@ app.post("/api/change-password", async (req, res) => {
 //     });
 // });
 
+
 io.use((socket, next) => {
   let cookieHeader = socket.request.headers.cookie;
 
   if (cookieHeader) {
-    // 1. Clean the header: if there are multiple cookies separated by commas or semicolons,
-    // we take the first one. iOS often appends a "raw" version and a "signed" version.
     if (cookieHeader.includes(",") || cookieHeader.includes(";")) {
-      // Split by common delimiters and find the segment containing our sid
       const parts = cookieHeader.split(/[,;]/);
       const sidPart = parts.find((p) => p.trim().startsWith("gateman.sid="));
 
@@ -439,15 +439,6 @@ io.use((socket, next) => {
   });
 });
 
-// ✅ Auth check
-// io.use((socket, next) => {
-//   if (!socket.request.user) {
-//     console.log("Unauthorized socket request");
-//     return next(new Error("Unauthorized"));
-//   }
-//   next();
-// });
-
 
 const userStatus = new Map();
 
@@ -459,6 +450,31 @@ io.on("connection", (socket) => {
     console.log(`✅ Socket connected: User ${user.id}`);
     const estateRoom = `estate_${estateId}`;
 
+    // setTimeout(async () => {
+    //   if (!socket.connected && user.role==='ADMIN') return;
+    //   const client = await pool.connect();
+    //   try {
+    //     const testTitle = "System Test 🛠️";
+    //     const testMessage =
+    //       "Real-time socket & DB test successful for YOUR session.";
+
+    //     const adminDb = await client.query(
+    //       `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
+    //        VALUES ($1, $2, 'admin', $3, $4, 'emergency')
+    //        RETURNING *`,
+    //       [estateId, user.id, testTitle, testMessage],
+    //     );
+
+    //     const adminNotif = adminDb.rows[0];
+    //     socket.emit("new_notification", adminNotif);
+    //     console.log(`✅ Test notification pushed to Admin: ${user.id}`);
+    //   } catch (err) {
+    //     console.error("❌ Socket Test Notification Error:", err);
+    //   } finally {
+    //     client.release();
+    //   }
+    // }, 5000);
+
     // 1. Join the estate-specific neighborhood
     socket.join(estateRoom);
     socket.join(`user_${user.id}`);
@@ -466,6 +482,12 @@ io.on("connection", (socket) => {
    
     // 2. Update Map
     userStatus.set(user.id, "online");
+    // userStatus.set(user.id, { status: "online", estateId: estateId });
+
+    // // FIX: Only send users from THE SAME estate
+    // const estateOnlineList = Array.from(userStatus.entries())
+    //   .filter(([_, data]) => data.estateId === estateId)
+    //   .map(([id, _]) => id);
 
     // 3. ONLY notify people in the same estate
     socket.to(estateRoom).emit("user_status_change", {
@@ -478,6 +500,7 @@ io.on("connection", (socket) => {
     const currentOnlineInEstate = Array.from(userStatus.keys());
 
     socket.emit("initial_online_list", currentOnlineInEstate);
+    // socket.emit("initial_online_list", estateOnlineList); 
 
     socket.on("typing_start", (targetId) => {
       console.log(`Typing: ${user.id} -> ${targetId}`);
@@ -508,7 +531,7 @@ io.on("connection", (socket) => {
 
     socket.on("disconnect", () => {
       userStatus.delete(user.id);
-      // ONLY notify people in the same estate
+      console.log(`❌ Socket disconnected: User ${user.id}`);
       socket.to(estateRoom).emit("user_status_change", {
         userId: user.id,
         status: "offline",

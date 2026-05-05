@@ -1052,7 +1052,7 @@ router.get("/payment-settings", isAuth, async (req, res) => {
     const responseData = {
       payment_type: mode,
       details:
-        mode === "API"
+        mode === "api"
           ? { external_api_url: estate.external_api_url }
           : {
               bank_name: estate.bank_name,

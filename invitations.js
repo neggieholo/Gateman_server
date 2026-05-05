@@ -447,30 +447,35 @@ cron.schedule('0 2 * * *', async () => {
 
 // 1. Define the logic as a named function
 const checkOverstays = async () => {
-  console.log("Check Overstays")
-  const client = await pool.connect(); 
+  console.log("Check Overstays");
+  const client = await pool.connect();
   try {
     const overstayQuery = `
-      SELECT i.id, i.guest_name, i.estate_id, i.resident_id, u.push_token as resident_token
+      SELECT 
+        i.id, i.guest_name, i.estate_id, i.resident_id, 
+        u.push_token as resident_token, u.name as resident_name,
+        u.block, u.unit
       FROM invitations i
       JOIN tenant_users u ON i.resident_id = u.id
       WHERE i.status = 'checked_in' 
       AND i.is_cancelled = false
       AND (i.end_date + i.end_time) < NOW();
     `;
-    // AND (i.end_date + i.end_time) < CURRENT_TIMESTAMP AT TIME ZONE 'UTC';
+
     const { rows: overstays } = await client.query(overstayQuery);
     if (overstays.length === 0) return;
 
     for (const record of overstays) {
       const alertTitle = "Overstay Alert 🚨";
-      const alertBody = `${record.guest_name} has exceeded their stay time.`;
+      const residentBody = `${record.guest_name} has exceeded their stay time.`;
+      // Specific message for Security and Admin
+      const securityAdminBody = `${record.guest_name} has overstayed. Invited by ${record.resident_name} (${record.block}, Unit ${record.unit}).`;
 
       const emergencyData = {
         type: "notification",
         subtype: "emergency",
-        user_id: record.resident_id, 
-        message: alertBody,
+        user_id: record.resident_id,
+        message: residentBody,
       };
 
       // --- 1. RESIDENT LOGIC ---
@@ -478,26 +483,25 @@ const checkOverstays = async () => {
         `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
          VALUES ($1, $2, 'tenant', $3, $4, 'emergency')
          RETURNING *`,
-        [record.estate_id, record.resident_id, alertTitle, alertBody]
+        [record.estate_id, record.resident_id, alertTitle, residentBody],
       );
-
-      const residentNotif = resDb.rows[0];
-      io.to(`user_${record.resident_id}`).emit("new_notification", residentNotif);
-
+      io.to(`user_${record.resident_id}`).emit(
+        "new_notification",
+        resDb.rows[0],
+      );
       if (record.resident_token) {
-        console.log('Sent Push to:', record.resident_id);
         sendPushNotification(
           record.resident_token,
           alertTitle,
-          alertBody,
+          residentBody,
           emergencyData,
         );
       }
 
-      // --- 2. SECURITY LOGIC ---
+      // --- 2. SECURITY LOGIC (On Duty) ---
       const { rows: onDutyGuards } = await client.query(
         "SELECT id, push_token FROM security_users WHERE estate_id = $1 AND is_on_duty = true",
-        [record.estate_id]
+        [record.estate_id],
       );
 
       for (const guard of onDutyGuards) {
@@ -505,24 +509,40 @@ const checkOverstays = async () => {
           `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
            VALUES ($1, $2, 'security', $3, $4, 'emergency')
            RETURNING *`,
-          [record.estate_id, guard.id, alertTitle, `[Duty Alert] ${alertBody}`]
+          [record.estate_id, guard.id, alertTitle, securityAdminBody],
         );
-
-        const guardNotif = guardDb.rows[0];
-        io.to(`user_${guard.id}`).emit("new_notification", guardNotif);
-
+        io.to(`user_${guard.id}`).emit("new_notification", guardDb.rows[0]);
         if (guard.push_token) {
-          console.log('Sent Push to:', guard.id);
           sendPushNotification(
             guard.push_token,
             alertTitle,
-            `[Duty Alert] ${alertBody}`,
+            securityAdminBody,
             { ...emergencyData, user_id: guard.id },
           );
         }
       }
 
-      await client.query("UPDATE invitations SET status = 'overstayed' WHERE id = $1", [record.id]);
+      // --- 3. ADMIN LOGIC ---
+      const adminResult = await client.query(
+        "SELECT id FROM estate_admin_users WHERE estate_id = $1",
+        [record.estate_id],
+      );
+
+      // Check if admin exists to avoid "undefined" errors
+      if (adminResult.rows.length > 0) {
+        const adminId = adminResult.rows[0].id;
+
+        const adminDb = await client.query(
+          `INSERT INTO notifications (estate_id, user_id, recipient_role, title, message, type) 
+     VALUES ($1, $2, 'admin', $3, $4, 'emergency')
+     RETURNING *`,
+          [record.estate_id, adminId, alertTitle, securityAdminBody],
+        );
+
+        // Socket emit for real-time web update
+        const adminNotif = adminDb.rows[0];
+        io.to(`user_${adminId}`).emit("new_notification", adminNotif);
+      }
     }
   } catch (err) {
     console.error("Overstay Check Error:", err);

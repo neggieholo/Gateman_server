@@ -1,6 +1,6 @@
 import express from "express";
 import pool from "./db.js";
-import { isAuth } from "./middlewares.js";
+import { isAuth, ensureAdmin } from "./middlewares.js";
 import { io } from "./server.js";
 import { sendPushNotification } from "./invitations.js";
 
@@ -404,6 +404,16 @@ router.post("/send-direct-notification", isAuth, async (req, res) => {
    } finally {
      client.release();
    }
+});
+
+router.patch("/posts/:id/seen", ensureAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query("UPDATE posts SET admin_seen = TRUE WHERE id = $1", [id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update seen status" });
+  }
 });
 
 export default router;
