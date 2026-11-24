@@ -1,30 +1,20 @@
-import nodemailer from 'nodemailer';
-
-// Configure the ZeptoMail Transporter
-// const transporter = nodemailer.createTransport({
-//     host: "smtp.zeptomail.com",
-//     port: 465,
-//     auth: {
-//     user: "emailapikey",
-//     pass: "wSsVR60i+xHwDqcrnGGlcrxtmwhTUVn+HU8s2AHw63b5HfvC8sc+kkXHDFejG6IYGWRqQDETrb8tzEtV2mEL3dQuzV0GCyiF9mqRe1U4J3x17qnvhDzPV29emhCOL44BwgRpnmdhG8kk+g=="
-//     }
-// });
+import nodemailer from "nodemailer";
 
 const transporter = nodemailer.createTransport({
-  name: "employeetracker.app",
+  name: "gatemanhq.com",
   host: "smtp.hostinger.com",
   port: 465,
   secure: true,
   auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
+    user: process.env.EMAIL_USER || "ceo@gatemanhq.com",
+    pass: process.env.EMAIL_PASS || "katia_obas@gatemanHQ2026",
   },
   debug: true, // Enable debugging
   logger: true, // Log SMTP responses
 });
 
 const APP_NAME = "GateMan";
-const FROM_EMAIL = '"GateMan" <support@employeetracker.app>';
+const FROM_EMAIL = '"GateMan" <ceo@gatemanhq.com>';
 
 /**
  * Send Registration OTP
@@ -76,9 +66,41 @@ export const sendPasswordResetCode = async (email, resetLink) => {
 };
 
 /**
+ * Send Temporary Password
+ */
+export const sendTemporaryPasswordEmail = async (email, tempPassword) => {
+  try {
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: email,
+      subject: `Your Temporary Password for ${APP_NAME}`,
+      html: `
+        <div style="font-family: sans-serif; max-width: 400px; margin: auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px;">
+          <h2 style="color: #4f46e5; text-align: center;">Temporary Password</h2>
+          <p style="font-size: 14px; color: #4b5563; text-align: center;">Use the temporary password below to log into your ${APP_NAME} account.</p>
+          <div style="background: #f9fafb; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+            <h1 style="margin: 0; letter-spacing: 8px; color: #111827; font-size: 32px; font-weight: bold;">${tempPassword}</h1>
+          </div>
+          <p style="font-size: 13px; color: #ef4444; text-align: center; font-weight: bold;">You will be required to change your password immediately upon logging in.</p>
+        </div>
+      `,
+    });
+    return true;
+  } catch (error) {
+    console.error("Temporary Password Email Error:", error);
+    return false;
+  }
+};
+
+/**
  * Send Event Guest Access Code (RSVP Success)
  */
-export const sendEventGuestCode = async (email, guestName, eventName, guestCode) => {
+export const sendEventGuestCode = async (
+  email,
+  guestName,
+  eventName,
+  guestCode,
+) => {
   try {
     await transporter.sendMail({
       from: FROM_EMAIL,
@@ -115,6 +137,166 @@ export const sendEventGuestCode = async (email, guestName, eventName, guestCode)
     return true;
   } catch (error) {
     console.error("Event Email Error:", error);
+    return false;
+  }
+};
+
+/**
+ * Send Admin Welcoming Credentials
+ */
+export const sendAdminWelcomeEmail = async (
+  email,
+  fullName,
+  rawPassword,
+  mustChangePassword,
+  hasPhone = false,
+) => {
+  try {
+    const credentialLabel = hasPhone
+      ? "Temporary Password (Part 1 - Email)"
+      : "Temporary Password";
+
+    const passwordNotice = hasPhone
+      ? `This is <strong>Part 1</strong> of your temporary password. The second part has been dispatched to your registered mobile phone via SMS. Combine both parts (<strong>Email Part + SMS Part</strong>) in that exact order to log into your workspace dashboard.`
+      : `Use these credentials to log into your workspace dashboard.`;
+
+    const passwordRotationNotice = mustChangePassword
+      ? `
+        <div style="background: #fffbeb; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+          <p style="margin: 0; font-size: 13px; color: #92400e; line-height: 1.5;">
+            <strong>⚠️ Mandatory Action Required:</strong> You are required to update this temporary password immediately during your first login sequence. Failure to do so will restrict your workspace entry access.
+          </p>
+        </div>
+      `
+      : "";
+
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: email,
+      subject: `Your ${APP_NAME} Administrative Workspace is Ready`,
+      html: `
+        <div style="font-family: sans-serif; max-width: 450px; margin: auto; padding: 25px; border: 1px solid #e5e7eb; border-radius: 24px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+          <div style="text-align: center; margin-bottom: 20px;">
+            <span style="background: #e0e7ff; color: #4338ca; padding: 6px 16px; border-radius: 20px; font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px;">Staff Account Deployed</span>
+          </div>
+          
+          <h2 style="color: #111827; margin-top: 0; font-size: 20px;">Welcome to the Team, ${fullName}!</h2>
+          <p style="font-size: 14px; color: #4b5563; line-height: 1.6; margin-bottom: 20px;">
+            An administrative profile has been securely provisioned for you on the <strong>${APP_NAME}</strong> platform. ${passwordNotice}
+          </p>
+
+          <div style="background: #f9fafb; border: 1px solid #e5e7eb; padding: 20px; border-radius: 16px; margin-bottom: 20px;">
+            <p style="margin: 0 0 8px 0; font-size: 13px; color: #374151;"><strong>Login Identity:</strong> <span style="color: #4f46e5; font-family: monospace;">${email}</span></p>
+            <p style="margin: 0; font-size: 13px; color: #374151;"><strong>${credentialLabel}:</strong> <span style="color: #111827; font-family: monospace; font-weight: bold; background: #f3f4f6; padding: 2px 6px; border-radius: 4px;">${rawPassword}</span></p>
+          </div>
+
+          <div style="background: #eff6ff; border-left: 4px solid #3b82f6; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+            <p style="margin: 0; font-size: 13px; color: #1e40af; line-height: 1.5;">
+              <strong>ℹ️ Email Verification Sequence:</strong> After entering these credentials at login, an authentication token will be delivered to this email box to verify ownership before your workspace opens.
+            </p>
+          </div>
+
+          ${passwordRotationNotice}
+
+          <p style="font-size: 12px; color: #9ca3af; text-align: center; border-top: 1px solid #f3f4f6; padding-top: 20px; margin-top: 25px;">
+            Powered by <strong>${APP_NAME}</strong> - HQ Security Management Suite
+          </p>
+        </div>
+      `,
+    });
+    return true;
+  } catch (error) {
+    console.error("Welcome Email Dispatch Operational Failure:", error);
+    return false;
+  }
+};
+
+export const sendTenantWelcomeEmail = async (
+  email,
+  fullName,
+  rawPassword,
+  isSubAccount = false,
+) => {
+  try {
+    const credentialLabel = isSubAccount
+      ? "Temporary Password (Part 1 - Email)"
+      : "Temporary Password";
+
+    const securityNotice = isSubAccount
+      ? `This is <strong>Part 1</strong> of your temporary password. The second part has been dispatched to your mobile phone via SMS. Combine both parts (<strong>Email Part + SMS Part</strong>) in that exact order to log in.`
+      : `Download the ${APP_NAME} mobile application, log in using these credentials, and you will be prompted to set up your permanent secure password right away.`;
+
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: email,
+      subject: `Your ${APP_NAME} Resident Profile Is Ready`,
+      html: `
+        <div style="font-family: sans-serif; max-width: 450px; margin: auto; padding: 25px; border: 1px solid #e5e7eb; border-radius: 24px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+          <div style="text-align: center; margin-bottom: 20px;">
+            <span style="background: #ecfdf5; color: #065f46; padding: 6px 16px; border-radius: 20px; font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px;">Resident Account Ready</span>
+          </div>
+          
+          <h2 style="color: #111827; margin-top: 0; font-size: 20px;">Welcome, ${fullName}!</h2>
+          <p style="font-size: 14px; color: #4b5563; line-height: 1.6; margin-bottom: 20px;">
+            An official resident profile has been provisioned for you by your estate's management on the <strong>${APP_NAME}</strong> platform. 
+          </p>
+
+          <div style="background: #f9fafb; border: 1px solid #e5e7eb; padding: 20px; border-radius: 16px; margin-bottom: 20px;">
+            <p style="margin: 0 0 8px 0; font-size: 13px; color: #374151;"><strong>Username/Email:</strong> <span style="color: #4f46e5; font-family: monospace;">${email}</span></p>
+            <p style="margin: 0; font-size: 13px; color: #374151;"><strong>${credentialLabel}:</strong> <span style="color: #111827; font-family: monospace; font-weight: bold; background: #f3f4f6; padding: 2px 6px; border-radius: 4px;">${rawPassword}</span></p>
+          </div>
+
+          <div style="background: #eff6ff; border-left: 4px solid #3b82f6; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+            <p style="margin: 0; font-size: 13px; color: #1e40af; line-height: 1.5;">
+              <strong>🔐 Getting Started:</strong> ${securityNotice}
+            </p>
+          </div>
+
+          <p style="font-size: 12px; color: #9ca3af; text-align: center; border-top: 1px solid #f3f4f6; padding-top: 20px; margin-top: 25px;">
+            Powered by <strong>${APP_NAME}</strong> - Smart Estate Security
+          </p>
+        </div>
+      `,
+    });
+    return true;
+  } catch (error) {
+    console.error("Tenant Welcome Email Dispatch Failure:", error);
+    return false;
+  }
+};
+
+export const sendTenantApprovalEmail = async (email, fullName, estateName) => {
+  try {
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: email,
+      subject: `Residency Approved - ${estateName || APP_NAME}`,
+      html: `
+        <div style="font-family: sans-serif; max-width: 450px; margin: auto; padding: 25px; border: 1px solid #e5e7eb; border-radius: 24px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+          <div style="text-align: center; margin-bottom: 20px;">
+            <span style="background: #ecfdf5; color: #065f46; padding: 6px 16px; border-radius: 20px; font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px;">Residency Approved 🎉</span>
+          </div>
+          
+          <h2 style="color: #111827; margin-top: 0; font-size: 20px;">Welcome, ${fullName}!</h2>
+          <p style="font-size: 14px; color: #4b5563; line-height: 1.6; margin-bottom: 20px;">
+            Your residency application for <strong>${estateName || "your estate"}</strong> has been officially approved by management.
+          </p>
+
+          <div style="background: #eff6ff; border-left: 4px solid #3b82f6; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+            <p style="margin: 0; font-size: 13px; color: #1e40af; line-height: 1.5;">
+              <strong>🚀 Next Steps:</strong> Log in using your existing account credentials to access your updated resident dashboard.
+            </p>
+          </div>
+
+          <p style="font-size: 12px; color: #9ca3af; text-align: center; border-top: 1px solid #f3f4f6; padding-top: 20px; margin-top: 25px;">
+            Powered by <strong>${APP_NAME}</strong> — Smart Estate Security
+          </p>
+        </div>
+      `,
+    });
+    return true;
+  } catch (error) {
+    console.error("Tenant Approval Email Dispatch Failure:", error);
     return false;
   }
 };

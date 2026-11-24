@@ -5,110 +5,74 @@ import bcrypt from "bcrypt";
 import pool from "./db.js";
 
 const configurePassport = (passport) => {
-  // TENANT LOGIN STRATEGY (checks tenant_users → temp_tenant_users)
-  passport.use(
-    "tenant-local",
-    new LocalStrategy(
-      { usernameField: "email" },
-      async (email, password, done) => {
-        try {
-          // 1️⃣ Check main tenant_users table
-          let result = await pool.query(
-            `SELECT t.*, e.name as estate_name 
-            FROM tenant_users t
-            JOIN estates e ON t.estate_id = e.id
-            WHERE t.email = $1`,
-            [email],
-          );
-
-          let user = result.rows[0];
-
-          if (!user) {
-            const tempResult = await pool.query(
-              "SELECT * FROM temp_tenant_users WHERE email = $1",
-              [email],
-            );
-            user = tempResult.rows[0];
-
-            if (user) {
-              user.isTemp = true;
-            }
-          }
-
-          if (!user) {
-            return done(null, false, { message: "Tenant not found" });
-          }
-
-          const match = await bcrypt.compare(password, user.password);
-          if (!match) {
-            return done(null, false, { message: "Incorrect password" });
-          }
-
-          if (!user.isTemp && user.first_login) {
-            console.log(`✨ First login for tenant: ${user.name}`);
-
-            try {
-              await pool.query(
-                "UPDATE tenant_users SET first_login = FALSE WHERE id = $1",
-                [user.id],
-              );
-
-              await pool.query(
-                "DELETE FROM temp_tenant_users WHERE email = $1",
-                [email],
-              );
-
-              user.showWelcome = true;
-            } catch (dbErr) {
-              console.error("Error updating first_login flag:", dbErr);
-            }
-          }
-
-          return done(null, user);
-        } catch (err) {
-          return done(err);
-        }
-      },
-    ),
-  );
-
-  // ESTATE ADMIN LOGIN STRATEGY
   passport.use(
     "admin-local",
     new LocalStrategy(
       { usernameField: "email" },
       async (email, password, done) => {
         try {
+          const compareEmail = email.toLowerCase();
+
           const result = await pool.query(
             `SELECT 
-              u.*, 
-              e.estate_code, 
-              e.name as estate_name,
-              e.state, 
-              e.lga,
-              e.town,
-              e.bank_name,
-              e.bank_code,
-              e.bank_account_number,
-              e.bank_account_name,
-              e.emergency_contacts,
-              e.payment_type,
-              e.external_api_url
-            FROM estate_admin_users u
-            LEFT JOIN estates e ON u.estate_id = e.id
-            WHERE u.email = $1`,
-            [email],
+             *
+           FROM estate_admin_users
+           WHERE LOWER(email) = $1`,
+            [compareEmail],
           );
 
           const user = result.rows[0];
-          console.log("User found in DB:", user ? "YES" : "NO");
           if (!user) return done(null, false, { message: "User not found" });
 
           const match = await bcrypt.compare(password, user.password);
           if (!match)
             return done(null, false, { message: "Incorrect password" });
 
-          // The 'user' object now contains 'estate_code'
+          if (user.estate_ids && user.estate_ids.length > 0) {
+            const estatesResult = await pool.query(
+              `SELECT id, name as estate_name, estate_code, street_address, state, lga, town, plan, payment_items, bank_name, bank_code, bank_account_number, bank_account_name, emergency_contacts, payment_type, external_api_url, subscription_expiry , created_at
+                 FROM estates 
+                 WHERE id = ANY($1::uuid[])`,
+              [user.estate_ids],
+            );
+            user.estates = estatesResult.rows;
+          } else {
+            user.estates = [];
+          }
+
+          // Auto-verify email and phone upon successful initial login
+          if (user.is_first_login) {
+            console.log(`✨ First login processing for admin: ${user.name}`);
+            try {
+              await pool.query(
+                `UPDATE estate_admin_users 
+                   SET is_first_login = FALSE,
+                   email_verified = TRUE,
+                   phone_verified = CASE WHEN phone_number IS NOT NULL AND phone_number != '' THEN TRUE ELSE phone_verified END
+               WHERE id = $1`,
+                [user.id],
+              );
+
+              user.is_first_login = true;
+              user.email_verified = true;
+              if (user.phone_number) user.phone_verified = true;
+            } catch (dbErr) {
+              console.error(
+                "Error processing admin first_login onboarding:",
+                dbErr,
+              );
+            }
+          }
+
+          const root_admin_result = await pool.query(
+            `SELECT * FROM estates WHERE LOWER(root_admin_email) = $1`,
+            [compareEmail],
+          );
+
+          if (root_admin_result.rows.length > 0) {
+            user.is_root_admin = true;
+          }
+
           return done(null, user);
         } catch (err) {
           return done(err);
@@ -117,29 +81,134 @@ const configurePassport = (passport) => {
     ),
   );
 
-  // SECURITY LOGIN STRATEGY (checks security_users → temp_security_users)
+  // RESIDENT LOGIN
   passport.use(
-    "security-local",
+    "tenant-local",
     new LocalStrategy(
-      { usernameField: "email" },
-      async (email, password, done) => {
+      { usernameField: "email", passReqToCallback: true },
+      async (req, email, password, done) => {
+        const compareEmail = email.toLowerCase();
         try {
-          // 1️⃣ Check permanent security_users table
+          const isBiometric = req.body.biometric_login === true;
+
+          // Step A: Fetch base permanent tenant details
           let result = await pool.query(
-            `SELECT s.*, e.name as estate_name 
-             FROM security_users s
-             JOIN estates e ON s.estate_id = e.id
-             WHERE s.email = $1`,
-            [email],
+            "SELECT * FROM tenant_users WHERE LOWER(email) = $1",
+            [compareEmail],
           );
 
           let user = result.rows[0];
 
-          // 2️⃣ If not found, check temp_security_users
+          // Step B: If not found, look up temp tenants
           if (!user) {
             const tempResult = await pool.query(
-              "SELECT * FROM temp_security_users WHERE email = $1",
-              [email],
+              "SELECT * FROM temp_tenant_users WHERE LOWER(email) = $1",
+              [compareEmail],
+            );
+            user = tempResult.rows[0];
+            if (user) user.isTemp = true;
+          }
+
+          if (!user) {
+            return done(null, false, { message: "Tenant not found" });
+          }
+
+          if (isBiometric && user.password_changed) {
+            return done(null, false, { message: "PASSWORD_CHANGED" });
+          }
+
+          let match = await bcrypt.compare(password, user.password);
+
+          if (!match && user.temp_password) {
+            match = await bcrypt.compare(password, user.temp_password);
+            if (match) {
+              user.isTempPassword = true;
+            }
+          }
+
+          if (!match) {
+            return done(null, false, { message: "Incorrect password" });
+          }
+
+          // Step C: If permanent user, aggregate all their estate profiles
+          if (!user.isTemp) {
+            if (user.estate_ids && user.estate_ids.length > 0) {
+              const estatesResult = await pool.query(
+                `SELECT id, name, street_address, state, lga, town, plan, subscription_expiry 
+                 FROM estates 
+                 WHERE id = ANY($1::uuid[])`,
+                [user.estate_ids],
+              );
+              user.estates = estatesResult.rows;
+            } else {
+              user.estates = [];
+            }
+            if (user.first_login) {
+              console.log(`✨ First login processing for tenant: ${user.name}`);
+              try {
+                await pool.query(
+                  `UPDATE tenant_users 
+                   SET first_login = FALSE
+                   WHERE id = $1`,
+                  [user.id],
+                );
+
+                user.first_login = true;
+                user.showWelcome = true;
+
+                // 2. Clear temp tenant record for main account registrations
+                if (!user.parent_account_id) {
+                  await pool.query(
+                    "DELETE FROM temp_tenant_users WHERE LOWER(email) = $1",
+                    [compareEmail],
+                  );
+                }
+              } catch (dbErr) {
+                console.error(
+                  "Error processing first_login onboarding:",
+                  dbErr,
+                );
+              }
+            }
+          }
+
+          if (!isBiometric && user.password_changed) {
+            await pool.query(
+              "UPDATE tenant_users SET password_changed = FALSE WHERE id = $1",
+              [user.id],
+            );
+          }
+
+          return done(null, user);
+        } catch (err) {
+          return done(err);
+        }
+      },
+    ),
+  );
+
+  // SECURITY LOGIN
+  passport.use(
+    "security-local",
+    new LocalStrategy(
+      { usernameField: "email", passReqToCallback: true },
+      async (req, email, password, done) => {
+        try {
+          const compareEmail = email.toLowerCase();
+          const isBiometric = req.body.biometric_login === true;
+          let result = await pool.query(
+            `SELECT * 
+             FROM security_users
+             WHERE LOWER(email) = $1`,
+            [compareEmail],
+          );
+
+          let user = result.rows[0];
+
+          if (!user) {
+            const tempResult = await pool.query(
+              "SELECT * FROM temp_security_users WHERE LOWER(email) = $1",
+              [compareEmail],
             );
             user = tempResult.rows[0];
             if (user) user.isTemp = true;
@@ -149,30 +218,58 @@ const configurePassport = (passport) => {
             return done(null, false, { message: "Security user not found" });
           }
 
+          if (isBiometric && user.password_changed) {
+            return done(null, false, {
+              message: "PASSWORD_CHANGED",
+            });
+          }
+          
           // 3️⃣ Verify Password
-          const match = await bcrypt.compare(password, user.password);
+          let match = await bcrypt.compare(password, user.password);
+
+          if (!match && user.temp_password) {
+            match = await bcrypt.compare(password, user.temp_password);
+            if (match) {
+              user.isTempPassword = true;
+            }
+          }
           if (!match) {
             return done(null, false, { message: "Incorrect password" });
           }
 
-          if (!user.isTemp && user.first_login) {
-            console.log(`✨ First login for tenant: ${user.name}`);
+          if (!user.isTemp) {
+            const estatesResult = await pool.query(
+              `SELECT id, name, address, state, lga, town, plan, subscription_expiry 
+                 FROM estates 
+                 WHERE id = $1`,
+              [user.estate_id],
+            );
+            user.estate = estatesResult.rows[0];
 
-            try {
-              await pool.query(
-                "UPDATE security_users SET first_login = FALSE WHERE id = $1",
-                [user.id],
-              );
+            if (user.first_login) {
+              try {
+                await pool.query(
+                  "UPDATE security_users SET first_login = FALSE WHERE id = $1",
+                  [user.id],
+                );
 
-              await pool.query(
-                "DELETE FROM temp_security_users WHERE email = $1",
-                [email],
-              );
+                await pool.query(
+                  "DELETE FROM temp_security_users WHERE LOWER(email) = $1",
+                  [compareEmail],
+                );
 
-              user.showWelcome = true;
-            } catch (dbErr) {
-              console.error("Error updating first_login flag:", dbErr);
+                user.showWelcome = true;
+              } catch (dbErr) {
+                console.error("Error updating first_login flag:", dbErr);
+              }
             }
+          }
+
+          if (!isBiometric && user.password_changed) {
+            await pool.query(
+              "UPDATE security_users SET password_changed = FALSE WHERE id = $1",
+              [user.id],
+            );
           }
 
           return done(null, user);
@@ -190,15 +287,12 @@ const configurePassport = (passport) => {
       {
         usernameField: "email",
         passwordField: "password",
-        passReqToCallback: true,
       },
-      async (req, email, password, done) => {
+      async (email, password, done) => {
         try {
-          const { name } = req.body; // This is the "Signature" from your form
-
           const result = await pool.query(
-            "SELECT * FROM super_admins WHERE email = $1 AND is_active = true",
-            [email.trim()],
+            "SELECT * FROM super_admins WHERE LOWER(email) = $1 AND is_active = true",
+            [email.trim().toLowerCase()],
           );
 
           const admin = result.rows[0];
@@ -210,59 +304,42 @@ const configurePassport = (passport) => {
             });
           }
 
-          // 2. Verify Signature (Case-insensitive check)
-          if (admin.full_name.toLowerCase() !== name.toLowerCase().trim()) {
-            return done(null, false, {
-              message: "Admin signature does not match this account.",
-            });
-          }
-
-          // 3. Verify Password
+          // 2. Verify Password
           const match = await bcrypt.compare(password, admin.password_hash);
           if (!match) {
             return done(null, false, {
-              message: "Incorrect master credentials.",
+              message: "Incorrect password.",
             });
           }
 
-          // Update last login
-          await pool.query(
-            "UPDATE super_admins SET last_login = NOW() WHERE id = $1",
-            [admin.id],
-          );
+          // 3. First login onboarding adjustments & auto-verifications
+          if (admin.is_first_login) {
+            console.log(
+              `✨ First login processing for super admin: ${admin.full_name}`,
+            );
+            try {
+              await pool.query(
+                `UPDATE super_admins 
+                  SET is_first_login = FALSE,
+                   email_verified = TRUE,
+                   phone_verified = CASE WHEN phone_number IS NOT NULL AND phone_number != '' THEN TRUE ELSE phone_verified END,
+                   last_login = NOW()
+               WHERE id = $1`,
+                [admin.id],
+              );
+
+              admin.is_first_login = true;
+              admin.email_verified = true;
+              if (admin.phone_number) admin.phone_verified = true;
+            } catch (dbErr) {
+              console.error(
+                "Error updating super admin first_login flags:",
+                dbErr,
+              );
+            }
+          }
 
           return done(null, admin);
-        } catch (err) {
-          return done(err);
-        }
-      },
-    ),
-  );
-
-  // VENDOR LOGIN STRATEGY
-  passport.use(
-    "vendor-local",
-    new LocalStrategy(
-      { usernameField: "email" },
-      async (email, password, done) => {
-        try {
-          const result = await pool.query(
-            "SELECT * FROM vendors WHERE email = $1",
-            [email.trim().toLowerCase()], // Added toLowerCase for safety
-          );
-
-          const vendor = result.rows[0];
-
-          if (!vendor) {
-            return done(null, false, { message: "Vendor account not found." });
-          }
-
-          // Verify Password against password_hash
-          const match = await bcrypt.compare(password, vendor.password_hash);
-          if (!match) {
-            return done(null, false, { message: "Incorrect password." });
-          }
-          return done(null, vendor);
         } catch (err) {
           return done(err);
         }
@@ -276,6 +353,7 @@ const configurePassport = (passport) => {
       id: user.id,
       type: user.role,
       isTemp: user.isTemp || false,
+      is_root_admin: user.is_root_admin || false,
     });
   });
 
@@ -287,43 +365,27 @@ const configurePassport = (passport) => {
       if (user.type === "SECURITY") {
         const query = user.isTemp
           ? `SELECT * FROM temp_security_users WHERE id = $1`
-          : `SELECT s.*, e.name as estate_name FROM security_users s JOIN estates e ON s.estate_id = e.id WHERE s.id = $1`;
-
+          : `SELECT * FROM security_users WHERE id = $1`;
         result = await pool.query(query, [user.id]);
       } else if (user.type === "TENANT") {
+        // Drop joins here—fetch directly from the newly altered table structure
         const query = user.isTemp
           ? `SELECT * FROM temp_tenant_users WHERE id = $1`
-          : `SELECT t.*, e.name as estate_name FROM tenant_users t JOIN estates e ON t.estate_id = e.id WHERE t.id = $1`;
-
+          : `SELECT * FROM tenant_users WHERE id = $1`;
         result = await pool.query(query, [user.id]);
       } else if (user.type === "SUPER_ADMIN") {
-        const query = "SELECT * FROM super_admins WHERE id = $1";
-
-        result = await pool.query(query, [user.id]);
+        result = await pool.query("SELECT * FROM super_admins WHERE id = $1", [
+          user.id,
+        ]);
       } else if (user.type === "VENDOR") {
-        const query = "SELECT * FROM vendors WHERE id = $1";
-
-        result = await pool.query(query, [user.id]);
+        result = await pool.query("SELECT * FROM vendors WHERE id = $1", [
+          user.id,
+        ]);
       } else {
-        // ADMIN
         result = await pool.query(
-          `SELECT 
-          u.*, 
-          e.estate_code, 
-          e.name as estate_name,
-          e.state, 
-          e.lga,
-          e.town,
-          e.bank_name,
-          e.bank_code,
-          e.bank_account_number,
-          e.bank_account_name,
-          e.emergency_contacts,
-          e.payment_type,
-          e.external_api_url
-        FROM estate_admin_users u
-        LEFT JOIN estates e ON u.estate_id = e.id
-        WHERE u.id = $1`,
+          `SELECT *           
+           FROM estate_admin_users 
+           WHERE id = $1`,
           [user.id],
         );
       }
@@ -332,6 +394,46 @@ const configurePassport = (passport) => {
 
       const finalUser = result.rows[0];
       if (user.isTemp) finalUser.isTemp = true;
+      if (user.is_root_admin) finalUser.is_root_admin = true;
+
+      if (user.type === "SECURITY" && !finalUser.isTemp) {
+        const estatesResult = await pool.query(
+          `SELECT id, name, address, state, lga, town, plan, subscription_expiry 
+                 FROM estates 
+                 WHERE id = $1`,
+          [finalUser.estate_id],
+        );
+        finalUser.estate = estatesResult.rows[0];
+      }
+
+      // Deep load complex array dependencies back into session state for permanent tenants
+      if (user.type === "TENANT" && !finalUser.isTemp) {
+        if (finalUser.estate_ids && finalUser.estate_ids.length > 0) {
+          const estatesResult = await pool.query(
+            `SELECT id, name, street_address, state, lga, town, plan, subscription_expiry
+             FROM estates 
+             WHERE id = ANY($1::uuid[])`,
+            [finalUser.estate_ids],
+          );
+          finalUser.estates = estatesResult.rows;
+        } else {
+          finalUser.estates = [];
+        }
+      }
+
+      if (user.type === "ADMIN") {
+        if (finalUser.estate_ids && finalUser.estate_ids.length > 0) {
+          const estatesResult = await pool.query(
+            `SELECT id, name as estate_name, estate_code, street_address, state, lga, town,plan, payment_items, bank_name, bank_code, bank_account_number, bank_account_name, emergency_contacts, payment_type, external_api_url, subscription_expiry 
+                 FROM estates 
+                 WHERE id = ANY($1::uuid[])`,
+            [finalUser.estate_ids],
+          );
+          finalUser.estates = estatesResult.rows;
+        } else {
+          finalUser.estates = [];
+        }
+      }
 
       done(null, finalUser);
     } catch (err) {
